@@ -75,7 +75,7 @@ langchain_rag_tutorial_app/
 ### 1. リポジトリを作成またはクローン
 
 ```bash
-git clone <your-repository-url>
+git clone https://github.com/NaoyaTokiwa/langchain_rag_tutorial_app.git
 cd langchain_rag_tutorial_app
 ```
 
