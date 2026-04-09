@@ -65,6 +65,9 @@ if "last_retrieved_docs" not in st.session_state:
 if "last_answer" not in st.session_state:
     st.session_state.last_answer = ""  # 直近の回答文
 
+if "retrieval_k" not in st.session_state:
+    st.session_state.retrieval_k = 3  # 検索件数の初期値
+
 
 # ============================================
 # 5. 補助関数：APIキー確認
@@ -158,12 +161,13 @@ def build_vectorstore(documents, chunk_size, chunk_overlap):
 # RAGの本番処理「検索→回答生成」です。
 # 「Retrieve→Generate」の流れを実装。
 
-def answer_question(question):
+def answer_question(question, k):
     """
     RAGで質問に回答
     
     Args:
         question: ユーザーの質問文
+        k:検索で取得するチャンク数
     
     Returns:
         tuple: (回答文, 検索されたDocumentリスト)
@@ -174,10 +178,10 @@ def answer_question(question):
         embedding_function=OpenAIEmbeddings(model="text-embedding-3-small")
     )
     
-    # 検索設定（上位3件取得）
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-    retrieved_docs = retriever.invoke(question)  # 質問に近いチャンク検索
-    
+    # 検索設定（UIで指定した件数を取得）
+    retriever = vectorstore.as_retriever(search_kwargs={"k": k})
+    retrieved_docs = retriever.invoke(question)
+
     # 検索結果を1つの文字列に結合（LLM用の参考文脈）
     context_text = "\n\n".join([doc.page_content for doc in retrieved_docs])
     
@@ -322,7 +326,19 @@ with left_col:
 # ============================================
 with right_col:
     st.header("💬 質問する")
+    st.caption(f"現在の検索件数 k = {st.session_state.retrieval_k}")
     
+    # ユーザーが k を1〜10の範囲で調整可能
+    retrieval_k = st.slider(
+        "🔎 検索件数 k",
+        min_value=1,
+        max_value=10,
+        value=st.session_state.retrieval_k,
+        step=1,
+        help="質問に対して、関連チャンクを何件取得するかを指定します。"
+    )
+    st.session_state.retrieval_k = retrieval_k
+
     # 質問入力
     question = st.text_input(
         "❓ 質問を入力",
@@ -341,7 +357,7 @@ with right_col:
         else:
             try:
                 with st.spinner("検索中...回答生成中..."):
-                    answer, retrieved_docs = answer_question(question)
+                    answer, retrieved_docs = answer_question(question, st.session_state.retrieval_k)
                     
                     # 状態更新
                     st.session_state.update({
@@ -361,7 +377,9 @@ with right_col:
     
     # 検索根拠表示
     if st.session_state.last_retrieved_docs:
-        st.subheader("🔍 検索根拠（上位3件）")
+        actual_k = len(st.session_state.last_retrieved_docs)
+        selected_k = st.session_state.retrieval_k
+        st.subheader(f"🔍 検索根拠（取得 {actual_k}件 / 設定 k={selected_k}）")
         for i, doc in enumerate(st.session_state.last_retrieved_docs):
             with st.expander(f"根拠 #{i+1}"):
                 st.text(doc.page_content)
