@@ -1,158 +1,206 @@
-### **1. RAG全体フロー**
+## 📋 各メソッド概要（LangChain重点）
+
+### 1. RAG全体フロー
+```text
 📄 Load → ✂️ Split → 🔢 Embed → 🗄️ Store → 🔍 Retrieve → 🤖 Generate
+```
 
-
-### **2. 補助関数一覧**
+### 2. 補助関数一覧
 | 関数名 | 役割 | LangChainコンポーネント | RAGフェーズ |
 |--------|------|-------------------|-------------|
 | `check_api_key()` | APIキー確認 | - | 前処理 |
-| `read_uploaded_file()` | **txt/md→Document** | **`Document`** | **Load** |
-| `build_vectorstore()` | **分割→埋め込み→Chroma** | **`TextSplitter`, `Embeddings`, `Chroma`** | **Split+Store** |
-| `answer_question()` | **検索→LLM回答** | **`Retriever`, `PromptTemplate`, `ChatOpenAI`, `chain`** | **Retrieve+Generate** |
+| `read_uploaded_file()` | txt / md を `Document` に変換 | `Document` | Load |
+| `build_vectorstore()` | 分割 → 埋め込み → Chroma保存 | `RecursiveCharacterTextSplitter`, `OpenAIEmbeddings`, `Chroma` | Split + Store |
+| `answer_question()` | 検索 → LLM回答生成 | `Chroma`, `ChatPromptTemplate`, `ChatOpenAI`, `chain` | Retrieve + Generate |
 
-### **3. LangChain重点解説**
+### 3. LangChain重点解説
 
-#### **`read_uploaded_file()` - Loadフェーズ**
-
+#### `read_uploaded_file()` - Loadフェーズ
 ```python
 Document(page_content=text, metadata={"source": filename})
 ```
-•	役割: Streamlitのファイル→LangChain標準 Document 形式変換  
-•	 Document :  page_content (本文) +  metadata (出典情報)※  
-※複数ファイルが入力されることが想定されるのでファイル名も使用
-•	重要: RAGの全処理が Document 前提
 
-#### ** `build_vectorstore()`  - Split+Storeフェーズ**
+- 役割: StreamlitのアップロードファイルをLangChain標準の `Document` 形式に変換する
+- `Document` は本文 `page_content` と出典情報 `metadata` を持つ
+- `metadata` にファイル名を持たせることで、根拠表示やデバッグに使える
+- RAGでは、後続処理が `Document` を前提に進む
+
+#### `build_vectorstore()` - Split + Storeフェーズ
 ```python
-# 1. 分割
 splitter = RecursiveCharacterTextSplitter(chunk_size=700, chunk_overlap=100)
 split_docs = splitter.split_documents(documents)
 
-# 2. 埋め込み
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
 
-# 3. ベクトルDB保存
-vectorstore = Chroma.from_documents(split_docs, embeddings, persist_directory="chroma_db")
-
+vectorstore = Chroma.from_documents(
+    split_docs,
+    embeddings,
+    persist_directory="chroma_db"
+)
 ```
 
-#### LangChainの基本パターン:
-```
+- `RecursiveCharacterTextSplitter` で長文を検索しやすいチャンクに分割する
+- `OpenAIEmbeddings` で各チャンクをベクトル化する
+- `Chroma` に保存することで、類似検索できる状態にする
+
+**LangChainの基本パターン**
+```text
 RecursiveCharacterTextSplitter → OpenAIEmbeddings → Chroma.from_documents
        ↓                           ↓                        ↓
-文書分割 → 文章→ベクトル変換 → 類似検索可能DB作成
+   文書分割 → 文章→ベクトル変換 → 類似検索可能DB作成
 ```
-####  **`answer_question()`  - Retrieve+Generateフェーズ**
-```python
-# Retrieve: ベクトル検索
-retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-retrieved_docs = retriever.invoke(question)
 
-# Generate: LLM回答
+#### `answer_question()` - Retrieve + Generateフェーズ
+```python
+retrieved_results = vectorstore.similarity_search_with_score(question, k=k)
+retrieved_docs = [doc for doc, score in retrieved_results]
+
 prompt = ChatPromptTemplate.from_template("文脈: {context}\n質問: {question}")
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-chain = prompt | llm  # LangChainチェーン（パイプ記法）
+chain = prompt | llm
 response = chain.invoke({"context": context_text, "question": question})
 ```
-LangChainの直感的パイプライン:
-```
-retriever → context_text → ChatPromptTemplate → ChatOpenAI → 回答
-      ↓           ↓                ↓                ↓
- 検索    → 文脈化 → テンプレート → LLM → 自然言語回答
+
+- `similarity_search_with_score()` で、質問に近いチャンクをスコア付きで取得する
+- 取得したチャンク本文を結合して `context_text` を作る
+- `ChatPromptTemplate` でプロンプトを組み立てる
+- `ChatOpenAI` に文脈と質問を渡して回答を生成する
+
+**LangChainの直感的パイプライン**
+```text
+similarity_search_with_score → context_text → ChatPromptTemplate → ChatOpenAI → 回答
+             ↓                      ↓                ↓                ↓
+      スコア付き検索 → 文脈化 → テンプレート化 → LLM実行 → 自然言語回答
 ```
 
-### ４. **LangChainコンポーネントマップ**
+### 4. 検索件数 `k` の可変化
+検索件数 `k` を可変にすると、何件の関連チャンクを取得するかをUIから調整できます。
+
+```python
+retrieved_results = vectorstore.similarity_search_with_score(question, k=k)
+```
+
+この機能により、Retriever設計のトレードオフを確認できます。
+
+- `k=1` の場合: 根拠が少なく、回答が短くなりやすい
+- `k=5` 以上の場合: 根拠は増えるが、関係の薄い情報も混ざりやすい
+
+つまり、`k` は「情報量」と「ノイズ量」のバランスを見ながら調整する必要があります。
+
+### 5. 類似度スコア表示
+検索結果ごとにスコアを表示すると、「なぜそのチャンクが選ばれたのか」を確認できます。
+
+```python
+for doc, score in retrieved_results:
+    print(score)
+```
+
+- スコアを見ることで、各チャンクの近さを比較できる
+- Chroma の `similarity_search_with_score()` が返す値は一般に **distance（距離）**
+- **値が小さいほど関連性が高い** と解釈する [web:382]
+
+この表示により、Retriever・Embedding・Chunk設計の影響を可視化できます。  
+以下は類似度出力結果例であるが、類似度スコアが良い(値が低い)チャンクが回答に使用されていることがわかる。
+
+<p align="center">
+  <img src="images/類似度確認結果.png" alt="類似度確認結果" width="900">
+</p>
+
+### 6. LangChainコンポーネントマップ
 | 機能 | LangChain部品 | 使用関数 |
 |------|---------------|----------|
-| **読み込み** | `Document` | `read_uploaded_file()` |
-| **分割** | `TextSplitter` | `build_vectorstore()` |
-| **埋め込み** | `OpenAIEmbeddings` | `build_vectorstore()` |
-| **ベクトルDB** | `Chroma` | `build_vectorstore()` |
-| **検索** | `Retriever` | `answer_question()` |
-| **プロンプト** | `ChatPromptTemplate` | `answer_question()` |
-| **LLM** | `ChatOpenAI` | `answer_question()` |
-| **チェーン** | `prompt \| llm` | `answer_question()` |
+| 読み込み | `Document` | `read_uploaded_file()` |
+| 分割 | `RecursiveCharacterTextSplitter` | `build_vectorstore()` |
+| 埋め込み | `OpenAIEmbeddings` | `build_vectorstore()` |
+| ベクトルDB | `Chroma` | `build_vectorstore()` |
+| 検索 | `similarity_search_with_score()` | `answer_question()` |
+| プロンプト | `ChatPromptTemplate` | `answer_question()` |
+| LLM | `ChatOpenAI` | `answer_question()` |
+| チェーン | `prompt \| llm` | `answer_question()` |
 
-### ５. **実行フロー（UI連携）**
-1. 左カラム: ファイル選択 → read_uploaded_file()
-2. 設定調整 → build_vectorstore() → session_state.chunks保存
-3. 右カラム: 質問入力 → answer_question()
-4. 結果表示: 回答 + retrieved_docs（根拠確認）
+### 7. 実行フロー（UI連携）
+1. 左カラムでファイルを選択し、`read_uploaded_file()` で読み込む
+2. `build_vectorstore()` で分割・埋め込み・保存を行う
+3. 右カラムで質問と検索件数 `k` を指定する
+4. `answer_question(question, k)` を実行する
+5. 回答、検索根拠、類似度スコアを表示する
 
-### ６. **学習価値**
-このコードはRAGの完全実装＋LangChain標準パターンを網羅：  
-•	Load→Split→Store（Indexing）  
-•	Retrieve→Generate（クエリ処理）  
-•	LangChainチェーン（ prompt\|llm ）  
-• ベクトルDB永続化（ persist_directory ）  
-•	UIデバッグ可能（チャンク・根拠確認）  
+### 8. 学習価値
+このコードでは、RAGとLangChainの標準的な構成を一通り学べます。
 
-### 7. プロンプトの5つの役割
-#### 1. 役割定義（System指示）
+- Load → Split → Store（Indexing）
+- Retrieve → Generate（クエリ処理）
+- LangChainチェーン（`prompt | llm`）
+- ベクトルDB永続化（`persist_directory`）
+- UIでの検索根拠確認
+- 検索件数 `k` によるRetriever設計の比較
+- 類似度スコアによる検索品質の可視化
+
+### 9. プロンプトの役割
+
+#### 1. 役割定義
 「あなたは初心者にもわかりやすく説明する親切なAIアシスタントです」
-•	効果: LLMに「親切・初心者向け」の回答スタイルを固定  
-	•	重要: 一貫したトーン・品質を保証  
-#### 2. ハルシネーション防止（最重要）
-```
-「以下の参考文脈だけを使って質問に答えてください」
-```
-❌ NG: 「LLMの全知識」で適当回答  
-✅ OK: 「{context}の中身」だけ使用  
-RAGの核心: 「検索結果外の情報は使わない」
 
-#### 3. 正直さ強制
+- 回答スタイルを「親切・初心者向け」に固定する
+- トーンの一貫性を保つ
+
+#### 2. ハルシネーション防止
+```text
+以下の参考文脈だけを使って質問に答えてください
 ```
-「文脈に答えがない場合は、『わかりません』と正直に伝えてください」
+
+- LLMの内部知識だけで推測回答するのを防ぐ
+- 検索結果に基づく回答へ寄せる
+
+#### 3. 正直さの強制
+```text
+文脈に答えがない場合は、「わかりません」と正直に伝えてください
 ```
-❌ 自信満々で嘘: 「〇〇です」（文脈にない）  
-✅ 正直回答: 「わかりません」
+
+- 根拠のない断定を避ける
+- RAGの信頼性を高める
 
 #### 4. 動的変数埋め込み
-{context} ← 検索結果（retrieved_docs）  
-{question} ← ユーザー質問
-実行時：
+- `{context}` ← 検索結果
+- `{question}` ← ユーザー質問
+
 ```python
-chain.invoke({"context": "リモート週3日...", "question": "リモート何日？"})
-↓
-「参考文脈: リモート週3日...\n質問: リモート何日？」
+chain.invoke({"context": context_text, "question": question})
 ```
+
 #### 5. LangChainチェーン連携
 ```python
-chain = prompt | llm  # パイプ記法
+chain = prompt | llm
 ```
-```
+
+```text
 テンプレート → LLM → 回答
     ↓
-{context, question} → GPT → 自然言語回答
+context と question を流し込んで自然言語回答を得る
 ```
-#### 🔍 実際の動作フロー
+
+### 10. 実際の動作フロー
 ```python
-1. retriever.invoke(question) → retrieved_docs
-2. context_text = "\n\n".join(doc.page_content)  
-3. chain.invoke({"context": context_text, "question": question})
+1. similarity_search_with_score(question, k=k) → retrieved_results
+2. retrieved_docs = [doc for doc, score in retrieved_results]
+3. context_text = "\n\n".join(doc.page_content for doc in retrieved_docs)
+4. chain.invoke({"context": context_text, "question": question})
+```
+
+```text
+参考文脈: [検索結果]
+質問: [ユーザー質問]
 ↓
-「参考文脈: [検索結果]\n質問: [ユーザー質問]」→ GPT → 回答
+GPT → 回答
 ```
-#### 💡 なぜこの設計か
-```
-一般LLM → 「推測回答」しがち
+
+### 11. なぜこの設計か
+```text
+一般LLM → 推測回答しがち
 ↓
-RAGプロンプト → 「検索結果限定」で正確回答
+RAGプロンプト → 検索結果限定で回答
 ↓
-信頼性UP + 根拠明確
-```
-このプロンプトは「RAGの信頼性を担保する設計」そのもの！
-
-#### 検索件数 `k` の可変化
-`Retriever` の `search_kwargs={"k": 3}` を可変にすると、何件の関連チャンクを取得するかを調整できます。
-
-```python
-retriever = vectorstore.as_retriever(search_kwargs={"k": k})
+信頼性向上 + 根拠明確化
 ```
 
-この機能を入れると、`Retriever` 設計のトレードオフを実際に確認できます。
-
-- `k=1` だと根拠が少なく、回答が短くなりやすい
-- `k=5` 以上だと根拠は増えるが、関係の薄い情報も混ざりやすい
-
-そのため、`k` は「少なすぎると情報不足、多すぎるとノイズ増加」というバランスを見ながら調整することが大切です。
+この設計は、RAGの信頼性を担保するための基本形です。

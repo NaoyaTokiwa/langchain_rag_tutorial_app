@@ -60,10 +60,7 @@ if "chunks" not in st.session_state:
     st.session_state.chunks = []  # 分割済み文書チャンク一覧
 
 if "last_retrieved_docs" not in st.session_state:
-    st.session_state.last_retrieved_docs = []  # 直近の検索結果（Documentのみ）
-
-if "last_retrieved_results" not in st.session_state:
-    st.session_state.last_retrieved_results = []  # 直近の検索結果（doc, score）
+    st.session_state.last_retrieved_docs = []  # 直近の検索結果
 
 if "last_answer" not in st.session_state:
     st.session_state.last_answer = ""  # 直近の回答文
@@ -173,19 +170,17 @@ def answer_question(question, k):
         k:検索で取得するチャンク数
     
     Returns:
-        tuple: (回答文, 検索結果リスト[(Document, score), ...])
+        tuple: (回答文, 検索されたDocumentリスト)
     """
     # 保存済みベクトルDB読み込み
     vectorstore = Chroma(
         persist_directory=str(PERSIST_DIR),
         embedding_function=OpenAIEmbeddings(model="text-embedding-3-small")
     )
-
-    # スコア付き類似検索
-    retrieved_results = vectorstore.similarity_search_with_score(question, k=k)
-
-    # LLMに渡すのはDocument本文のみ
-    retrieved_docs = [doc for doc, score in retrieved_results]
+    
+    # 検索設定（UIで指定した件数を取得）
+    retriever = vectorstore.as_retriever(search_kwargs={"k": k})
+    retrieved_docs = retriever.invoke(question)
 
     # 検索結果を1つの文字列に結合（LLM用の参考文脈）
     context_text = "\n\n".join([doc.page_content for doc in retrieved_docs])
@@ -215,7 +210,7 @@ def answer_question(question, k):
         "question": question        # ユーザーの質問
     })
     
-    return response.content, retrieved_results
+    return response.content, retrieved_docs
 
 
 # ============================================
@@ -245,7 +240,6 @@ LangChainが各工程をつなぎやすくします
 3. **ベクトルDB作成**
 4. **質問検索**
 5. **根拠付き回答**
-6. **検索件数kとスコアの比較**
     """)
 
 st.markdown("---")
@@ -303,10 +297,7 @@ with left_col:
                     # 3. 状態更新
                     st.session_state.update({
                         "vectorstore_ready": True,
-                        "chunks": split_docs,
-                        "last_answer": "",
-                        "last_retrieved_docs": [],
-                        "last_retrieved_results": []
+                        "chunks": split_docs
                     })
                 
                 st.success(f"✅ 完了！チャンク数: **{len(split_docs)}**件")
@@ -366,16 +357,12 @@ with right_col:
         else:
             try:
                 with st.spinner("検索中...回答生成中..."):
-                    answer, retrieved_results = answer_question(
-                        question,
-                        st.session_state.retrieval_k
-                    )
-
+                    answer, retrieved_docs = answer_question(question, st.session_state.retrieval_k)
+                    
                     # 状態更新
                     st.session_state.update({
                         "last_answer": answer,
-                        "last_retrieved_results": retrieved_results,
-                        "last_retrieved_docs": [doc for doc, score in retrieved_results]
+                        "last_retrieved_docs": retrieved_docs
                     })
                     
                 st.success("✅ 回答完了！")
@@ -389,17 +376,14 @@ with right_col:
         st.markdown(f"**{st.session_state.last_answer}**")
     
     # 検索根拠表示
-    if st.session_state.last_retrieved_results:
-        actual_k = len(st.session_state.last_retrieved_results)
+    if st.session_state.last_retrieved_docs:
+        actual_k = len(st.session_state.last_retrieved_docs)
         selected_k = st.session_state.retrieval_k
         st.subheader(f"🔍 検索根拠（取得 {actual_k}件 / 設定 k={selected_k}）")
-        
-        for i, (doc, score) in enumerate(st.session_state.last_retrieved_results):
+        for i, doc in enumerate(st.session_state.last_retrieved_docs):
             with st.expander(f"根拠 #{i+1}"):
                 st.text(doc.page_content)
                 st.caption(f"📄 {doc.metadata.get('source', '不明')}")
-                st.caption(f"📏 類似度スコア（distance）: {score:.4f}")
-                st.caption("※ Chromaのscoreは距離のため、小さいほど関連性が高い")
 
 
 # ============================================
@@ -422,6 +406,5 @@ with st.expander("🎓 学習のポイント", expanded=False):
     ### 💡 **確認すべき点**
     1. チャンク分割の具合
     2. 検索された根拠文書
-    3. 類似度スコア（distance）
-    4. 回答の正確性
+    3. 回答の正確性
     """)
