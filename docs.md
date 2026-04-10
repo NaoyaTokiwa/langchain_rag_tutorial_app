@@ -10,7 +10,8 @@
 |--------|------|-------------------|-------------|
 | `check_api_key()` | APIキー確認 | - | 前処理 |
 | `read_uploaded_file()` | txt / md を `Document` に変換 | `Document` | Load |
-| `build_vectorstore()` | 分割 → 埋め込み → Chroma保存 | `RecursiveCharacterTextSplitter`, `OpenAIEmbeddings`, `Chroma` | Split + Store |
+| `split_documents()` | 分割方式に応じて文書をチャンク化 | `RecursiveCharacterTextSplitter`, `CharacterTextSplitter` | Split |
+| `build_vectorstore()` | 分割 → 埋め込み → Chroma保存 | `TextSplitter`, `OpenAIEmbeddings`, `Chroma` | Split + Store |
 | `get_prompt_template()` | プロンプト切り替え | `ChatPromptTemplate` | Prompt |
 | `answer_question()` | 検索 → プロンプト適用 → LLM回答生成 | `Chroma`, `ChatPromptTemplate`, `ChatOpenAI`, `chain` | Retrieve + Generate |
 
@@ -26,10 +27,36 @@ Document(page_content=text, metadata={"source": filename})
 - `metadata` にファイル名を持たせることで、根拠表示やデバッグに使える
 - RAGでは、後続処理が `Document` を前提に進む
 
+#### `split_documents()` - Splitフェーズ
+```python
+if splitter_type == "RecursiveCharacterTextSplitter":
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap
+    )
+elif splitter_type == "CharacterTextSplitter":
+    splitter = CharacterTextSplitter(
+        separator="\n\n",
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap
+    )
+
+split_docs = splitter.split_documents(documents)
+```
+
+- 分割方式に応じて TextSplitter を切り替えるための関数
+- `RecursiveCharacterTextSplitter` は改行・空白など複数の区切り候補を段階的に使う
+- `CharacterTextSplitter` は指定した区切り文字を基準に比較的単純に分割する
+- 同じ文書でも、分割方式によってチャンク数やチャンク境界が変わる
+
 #### `build_vectorstore()` - Split + Storeフェーズ
 ```python
-splitter = RecursiveCharacterTextSplitter(chunk_size=700, chunk_overlap=100)
-split_docs = splitter.split_documents(documents)
+split_docs = split_documents(
+    documents,
+    splitter_type,
+    chunk_size,
+    chunk_overlap
+)
 
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
 
@@ -40,15 +67,15 @@ vectorstore = Chroma.from_documents(
 )
 ```
 
-- `RecursiveCharacterTextSplitter` で長文を検索しやすいチャンクに分割する
+- `split_documents()` で選択中の分割方式に応じてチャンク化する
 - `OpenAIEmbeddings` で各チャンクをベクトル化する
 - `Chroma` に保存することで、類似検索できる状態にする
 
 **LangChainの基本パターン**
 ```text
-RecursiveCharacterTextSplitter → OpenAIEmbeddings → Chroma.from_documents
-       ↓                           ↓                        ↓
-   文書分割 → 文章→ベクトル変換 → 類似検索可能DB作成
+TextSplitter → OpenAIEmbeddings → Chroma.from_documents
+     ↓                 ↓                   ↓
+ 文書分割 → 文章→ベクトル変換 → 類似検索可能DB作成
 ```
 
 #### `get_prompt_template()` - Promptフェーズ
@@ -118,7 +145,7 @@ for doc, score in retrieved_results:
 - **値が小さいほど関連性が高い** と解釈する
 
 この表示により、Retriever・Embedding・Chunk設計の影響を可視化できます。  
-類似度スコアが良いチャンクほど、回答根拠として使われやすいことを確認できます(以下図参照)。
+類似度スコアが良いチャンクほど、回答根拠として使われやすいことを確認できます。
 
 <p align="center">
   <img src="images/類似度確認結果.png" alt="類似度確認結果" width="900">
@@ -142,14 +169,42 @@ prompt_type = st.selectbox(
 指定したプロンプト通りの動作になっていることを確認できます（以下は箇条書き重視の出力結果例）。
 
 <p align="center">
-  <img src="images/箇条書き重視.png" alt="類似度確認結果" width="900">
+  <img src="images/箇条書き重視.png" alt="箇条書き重視の出力結果" width="900">
 </p>
 
-### 7. LangChainコンポーネントマップ
+### 7. 分割方式の比較機能
+このアプリでは、分割方式の違いを確認するために、`RecursiveCharacterTextSplitter` と `CharacterTextSplitter` を切り替えて比較できます。
+
+```python
+splitter_type = st.selectbox(
+    "✂️ 分割方式",
+    ["RecursiveCharacterTextSplitter", "CharacterTextSplitter"]
+)
+```
+
+- **RecursiveCharacterTextSplitter**: 改行や空白など複数の区切り候補を使い、できるだけ自然な単位を保って分割する
+- **CharacterTextSplitter**: 指定した区切り文字を基準に、比較的単純なルールで分割する
+- `chunk_size` と `chunk_overlap` を同じにしても、文書構造によっては分割結果が変わる
+- 特に改行が少ない長文では、分割方式の違いがチャンク境界に表れやすい
+
+この機能により、**前処理の設計が検索品質に直結する** ことを学べます。
+
+#### CharacterTextSplitter の分割結果例
+以下は [改行を減らして段落を長くしたサンプル架空企業の社内ハンドブック](data/sample_company_handbook_long_paragraph.txt)を`CharacterTextSplitter` を用いて分割した結果例です。  
+改行を基準に比較的単純に分割されるため、文書構造によってはチャンクの切れ目が機械的になりやすい一方、区切りが明確な文書では十分自然に分割できることがわかる。また、各分割方式(CharacterTextSplitter ,RecursiveCharacterTextSplitter)を同一文章・同一条件下(chunk_size=300, chunk_overlap=0)に適用すると、得られるチャンク数が異なることも確認できた。CharacterTextSplitterを用いたチャンク数は3である一方、RecursiveCharacterTextSplitterを用いたチャンク数は9となった。
+
+<p align="center">
+  <img src="./images/charactorTextSplitterを用いた分割結果.png" alt="CharacterTextSplitterを用いた分割結果" width="900">
+</p>
+
+この結果から、`CharacterTextSplitter` はシンプルで分かりやすい一方、文書によっては意味のまとまりよりも区切り文字に強く依存することが確認できる。  
+そのため、自然文中心の文書では `RecursiveCharacterTextSplitter` のほうが安定しやすく、構造が明確な文書では `CharacterTextSplitter` でも十分に使える、という比較学習が可能。
+
+### 8. LangChainコンポーネントマップ
 | 機能 | LangChain部品 | 使用関数 |
 |------|---------------|----------|
 | 読み込み | `Document` | `read_uploaded_file()` |
-| 分割 | `RecursiveCharacterTextSplitter` | `build_vectorstore()` |
+| 分割方式選択 | `RecursiveCharacterTextSplitter`, `CharacterTextSplitter` | `split_documents()` |
 | 埋め込み | `OpenAIEmbeddings` | `build_vectorstore()` |
 | ベクトルDB | `Chroma` | `build_vectorstore()` |
 | 検索 | `similarity_search_with_score()` | `answer_question()` |
@@ -157,14 +212,16 @@ prompt_type = st.selectbox(
 | LLM | `ChatOpenAI` | `answer_question()` |
 | チェーン | `prompt \| llm` | `answer_question()` |
 
-### 8. 実行フロー（UI連携）
+### 9. 実行フロー（UI連携）
 1. 左カラムでファイルを選択し、`read_uploaded_file()` で読み込む
-2. `build_vectorstore()` で分割・埋め込み・保存を行う
-3. 右カラムで質問、検索件数 `k`、プロンプトタイプを指定する
-4. `answer_question(question, k, prompt_type)` を実行する
-5. 回答、検索根拠、類似度スコアを表示する
+2. 分割方式、`chunk_size`、`chunk_overlap` を設定する
+3. `build_vectorstore()` で分割・埋め込み・保存を行う
+4. 必要に応じて分割方式比較を表示し、チャンク数やチャンク内容の違いを確認する
+5. 右カラムで質問、検索件数 `k`、プロンプトタイプを指定する
+6. `answer_question(question, k, prompt_type)` を実行する
+7. 回答、検索根拠、類似度スコアを表示する
 
-### 9. 学習価値
+### 10. 学習価値
 このコードでは、RAGとLangChainの標準的な構成を一通り学べます。
 
 - Load → Split → Store（Indexing）
@@ -175,8 +232,9 @@ prompt_type = st.selectbox(
 - 検索件数 `k` によるRetriever設計の比較
 - 類似度スコアによる検索品質の可視化
 - プロンプト切り替えによる回答スタイルの比較
+- 分割方式によるチャンク設計の比較
 
-### 10. プロンプトの役割
+### 11. プロンプトの役割
 
 #### 1. 役割定義
 「あなたは初心者にもわかりやすく説明する親切なAIアシスタントです」
@@ -219,7 +277,7 @@ chain = prompt | llm
 context と question を流し込んで自然言語回答を得る
 ```
 
-### 11. プロンプト切り替えで学べること
+### 12. プロンプト切り替えで学べること
 プロンプト切り替え機能を入れると、Retriever は同じでも Prompt によって最終出力が変わることを体験できます。
 
 たとえば同じ検索結果に対しても、次のように出力の形が変わります。
@@ -230,13 +288,25 @@ context と question を流し込んで自然言語回答を得る
 
 これは、検索設計と回答設計の役割分担を理解するうえで重要です。
 
-### 12. 実際の動作フロー
+### 13. 分割方式比較で学べること
+分割方式比較機能を入れると、**同じ文書でも Splitter によってチャンク境界やチャンク数が変わる** ことを体験できます。
+
+たとえば次のような違いを観察できます。
+
+- **RecursiveCharacterTextSplitter**: 自然なまとまりを保ちやすい
+- **CharacterTextSplitter**: 区切り文字に沿って素直に切れやすい
+- **chunk_size / chunk_overlap**: チャンク粒度と文脈保持のバランスを左右する
+
+これは、検索品質が Embedding や LLM だけでなく、**前処理の分割設計** にも強く依存することを理解するうえで重要です。
+
+### 14. 実際の動作フロー
 ```python
-1. similarity_search_with_score(question, k=k) → retrieved_results
-2. retrieved_docs = [doc for doc, score in retrieved_results]
-3. context_text = "\n\n".join(doc.page_content for doc in retrieved_docs)
-4. prompt = get_prompt_template(prompt_type)
-5. chain.invoke({"context": context_text, "question": question})
+1. split_documents(documents, splitter_type, chunk_size, chunk_overlap) → split_docs
+2. Chroma.from_documents(split_docs, embeddings, persist_directory=...)
+3. similarity_search_with_score(question, k=k) → retrieved_results
+4. context_text = "\n\n".join(doc.page_content for doc in retrieved_docs)
+5. prompt = get_prompt_template(prompt_type)
+6. chain.invoke({"context": context_text, "question": question})
 ```
 
 ```text
@@ -247,7 +317,7 @@ context と question を流し込んで自然言語回答を得る
 GPT → 回答
 ```
 
-### 13. なぜこの設計か
+### 15. なぜこの設計か
 ```text
 一般LLM → 推測回答しがち
 ↓
@@ -255,7 +325,9 @@ RAGプロンプト → 検索結果限定で回答
 ↓
 さらにプロンプト切替 → 回答スタイルも制御可能
 ↓
+さらに分割方式比較 → 前処理の影響も確認可能
+↓
 信頼性向上 + 根拠明確化 + 表現調整
 ```
 
-この設計は、RAGの信頼性を保ちながら、用途に応じて回答の見せ方まで制御するための基本形です。
+この設計は、RAGの信頼性を保ちながら、用途に応じて回答の見せ方や前処理の違いまで学べる構成です。
