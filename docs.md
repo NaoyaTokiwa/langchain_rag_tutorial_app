@@ -115,10 +115,7 @@ def get_prompt_template(prompt_type):
 ```python
 retrieved_results = vectorstore.similarity_search_with_score(question, k=k)
 retrieved_docs = [doc for doc, score in retrieved_results]
-context_text = "
-
-".join([doc.page_content for doc in retrieved_docs])
-history_text = format_chat_history(chat_history or [], max_turns=3)
+context_text = "\n\n".join([doc.page_content for doc in retrieved_docs])
 
 prompt = get_prompt_template(prompt_type)
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
@@ -140,7 +137,7 @@ response = chain.invoke({
 ```text
 similarity_search_with_score → context_text ┐
 format_chat_history          → history_text ├→ get_prompt_template → ChatOpenAI → 回答
-質問入力                     → question     ┘
+質問入力                     → question      ┘
 ```
 
 ### 4. 検索件数 `k` の可変化
@@ -409,16 +406,16 @@ chat_history と context と question を流し込んで自然言語回答を得
 - **会話履歴あり**: 1つ前の質問「リモートワークは何日まで可能？」を踏まえて、「その根拠は？」が何を指しているか補完しやすい
 - **会話履歴なし**: 2つ目の質問だけでは対象が曖昧になりやすく、単発RAGとしては前提不足になりやすい
 
-#### 会話履歴ありの例
+#### 会話履歴ありの例：根拠を出力
 
 <p align="center">
-  <img src="./images/会話履歴あり_回答例.png.png" alt="会話履歴あり_回答例" width="900">
+  <img src="./images/会話履歴あり_回答例.png" alt="会話履歴あり_回答例" width="900">
 </p>
 
-#### 会話履歴なしの例
+#### 会話履歴なしの例：わからないと回答
 
 <p align="center">
-  <img src="./images/会話履歴なし_回答例.png.png" alt="会話履歴なし_回答例" width="900">
+  <img src="./images/会話履歴なし_回答例.png" alt="会話履歴なし_回答例" width="900">
 </p>
 
 この比較により、会話履歴を持たせることで、**文脈を引き継いだ質問応答** がしやすくなることを確認できます。
