@@ -3,6 +3,7 @@
 LangChain、LangGraph、Streamlit を使って、RAG（Retrieval-Augmented Generation）の基本を学べる初心者向けチュートリアルアプリです。
 
 このアプリでは、文書のアップロード、チャンク分割、埋め込み、ベクトルDB保存、検索、回答生成までの流れを、UIで確認しながら体験できます。加えて、検索件数 `k`、プロンプトタイプ、分割方式、**LangGraph を用いた会話履歴つきQ&A** を切り替えながら、RAGの設計ポイントを比較学習できます。
+注意：本来であれば、`app.py`を`config.py`や`ui.py`など役割ごとに分割する構成にする方が望ましいが、生成AI活用した修正が行いやすいように1つのファイルにて管理している
 
 ## このアプリでできること
 
@@ -173,8 +174,6 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-`requirements.txt` には `langgraph` も追加してください。
-
 ### 4. 環境変数を設定
 
 `.env.example` をコピーして `.env` を作成し、OpenAI API キーを設定します。
@@ -213,4 +212,17 @@ streamlit run app.py
 - `.env` は機密情報を含むため、GitHub に push しないでください。
 - 初回実行時は埋め込み作成とベクトル化に少し時間がかかる場合があります。
 - `chroma_db` は実行時に再作成されます。
-- LangChain や LangGraph のバージョン差分で API が変わることがあるため、`requirements.txt` の固定管理をおすすめします。
+- LangChain のバージョン差分でAPIが変わることがあるため、`requirements.txt` の固定管理をおすすめします。
+
+## 今後の改善案
+- 検索件数 k の可変化 --> 実装済み
+  - ~~`answer_question()`では現在`search_kwargs={"k": 3}`で固定されているが、UIから変更できるようにすることで、Retrieverが何件の文書を返すかで回答がどう変わるかを比較できる。`as_retriever()`の役割、検索件数と回答精度の関係、ノイズ混入の感覚を把握できる。~~
+- 類似度スコアの表示 --> 実装済み
+  - ~~今は retriever.invoke(question) で文書だけを取得しているが、スコア付き検索に変えると、「なぜそのチャンクが選ばれたのか」 を見える化できる。ベクトル検索が単なる文字一致ではなく、埋め込み空間での近さで選ばれていることを確認できる。~~
+- プロンプト切り替え機能 --> 実装済み
+  - ~~現在の ChatPromptTemplate.from_template(...) は1種類だけなので、「初心者向け」「要約重視」「箇条書き重視」 など複数のプロンプトを切り替えられるようにすると、プロンプト設計の影響を比較する。LangChainの ChatPromptTemplate が回答の文体・制約・出力形式を大きく左右することを確認予定。~~
+- チャンク分割方式の比較  --> 実装済み
+  - ~~現在はRecursiveCharacterTextSplitter のみだが、別の分割条件や chunk_size / chunk_overlap の比較表示を加えることで、前処理の設計が検索品質に直結することを確認する~~
+- 会話履歴つきQ&A --> 実装済み
+  - ~~answer_question(question) は単発質問だが、会話履歴を st.session_state に持たせて、前の質問と回答を参考に次の質問へつなげると、LangChainでのメモリ的な考え方を学べる。単発RAGと対話型RAGの違い、状態管理の重要性、将来的なLangGraph拡張を予定。~~
+- LangGraphを用いた会話履歴つきQ&A --> 実装済み
