@@ -3,6 +3,8 @@
 ### 1. RAG全体フロー
 ```text
 📄 Load → ✂️ Split → 🔢 Embed → 🗄️ Store → 🔍 Retrieve → 🧠 Prompt → 🤖 Generate
+                                   ↓
+                            🗂️ Chat History
 ```
 
 ### 2. 補助関数一覧
@@ -12,8 +14,9 @@
 | `read_uploaded_file()` | txt / md を `Document` に変換 | `Document` | Load |
 | `split_documents()` | 分割方式に応じて文書をチャンク化 | `RecursiveCharacterTextSplitter`, `CharacterTextSplitter` | Split |
 | `build_vectorstore()` | 分割 → 埋め込み → Chroma保存 | `TextSplitter`, `OpenAIEmbeddings`, `Chroma` | Split + Store |
+| `format_chat_history()` | 直近の会話履歴を整形 | - | Memory補助 |
 | `get_prompt_template()` | プロンプト切り替え | `ChatPromptTemplate` | Prompt |
-| `answer_question()` | 検索 → プロンプト適用 → LLM回答生成 | `Chroma`, `ChatPromptTemplate`, `ChatOpenAI`, `chain` | Retrieve + Generate |
+| `answer_question()` | 検索 → 会話履歴付与 → プロンプト適用 → LLM回答生成 | `Chroma`, `ChatPromptTemplate`, `ChatOpenAI`, `chain` | Retrieve + Generate |
 
 ### 3. LangChain重点解説
 
@@ -78,6 +81,20 @@ TextSplitter → OpenAIEmbeddings → Chroma.from_documents
  文書分割 → 文章→ベクトル変換 → 類似検索可能DB作成
 ```
 
+#### `format_chat_history()` - Memory補助
+```python
+def format_chat_history(chat_history, max_turns=3):
+    recent_history = chat_history[-max_turns:]
+
+    if not recent_history:
+        return "会話履歴なし"
+```
+
+- `st.session_state.chat_history` に保存した会話履歴を、LLMへ渡しやすい文字列へ整形する
+- 直近数ターンだけを使うことで、文脈補完とプロンプト量のバランスを取る
+- LangChain標準のMemoryクラスではないが、会話状態を扱う考え方を学べる
+- 将来的に LangGraph の状態管理へ拡張する前段として理解しやすい
+
 #### `get_prompt_template()` - Promptフェーズ
 ```python
 def get_prompt_template(prompt_type):
@@ -92,30 +109,38 @@ def get_prompt_template(prompt_type):
 - 回答スタイルをプロンプトごとに切り替えるための関数
 - `ChatPromptTemplate` をテンプレートごとに出し分ける
 - 同じ検索結果でも、プロンプト次第で回答の形を変えられる
-- 検索処理と回答スタイルを分けて設計できるのがポイント
+- 会話履歴をテンプレート変数に追加することで、単発RAGと対話型RAGを切り替えられる
 
 #### `answer_question()` - Retrieve + Generateフェーズ
 ```python
 retrieved_results = vectorstore.similarity_search_with_score(question, k=k)
 retrieved_docs = [doc for doc, score in retrieved_results]
-context_text = "\n\n".join([doc.page_content for doc in retrieved_docs])
+context_text = "
+
+".join([doc.page_content for doc in retrieved_docs])
+history_text = format_chat_history(chat_history or [], max_turns=3)
 
 prompt = get_prompt_template(prompt_type)
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 chain = prompt | llm
-response = chain.invoke({"context": context_text, "question": question})
+response = chain.invoke({
+    "chat_history": history_text,
+    "context": context_text,
+    "question": question
+})
 ```
 
 - `similarity_search_with_score()` で、質問に近いチャンクをスコア付きで取得する
 - 取得したチャンク本文を結合して `context_text` を作る
+- `format_chat_history()` で会話履歴を整形し、質問の前提文脈として渡す
 - `get_prompt_template(prompt_type)` で選択中のプロンプトを取得する
-- `ChatOpenAI` に文脈と質問を渡して回答を生成する
+- `ChatOpenAI` に会話履歴・参考文脈・質問を渡して回答を生成する
 
 **LangChainの直感的パイプライン**
 ```text
-similarity_search_with_score → context_text → get_prompt_template → ChatOpenAI → 回答
-             ↓                      ↓                ↓                ↓
-      スコア付き検索 → 文脈化 → プロンプト切替 → LLM実行 → 自然言語回答
+similarity_search_with_score → context_text ┐
+format_chat_history          → history_text ├→ get_prompt_template → ChatOpenAI → 回答
+質問入力                     → question     ┘
 ```
 
 ### 4. 検索件数 `k` の可変化
@@ -200,7 +225,57 @@ splitter_type = st.selectbox(
 この結果から、`CharacterTextSplitter` はシンプルで分かりやすい一方、文書によっては意味のまとまりよりも区切り文字に強く依存することが確認できる。  
 そのため、自然文中心の文書では `RecursiveCharacterTextSplitter` のほうが安定しやすく、構造が明確な文書では `CharacterTextSplitter` でも十分に使える、という比較学習が可能。
 
-### 8. LangChainコンポーネントマップ
+### 8. 会話履歴つきQ&A機能
+このアプリでは、`st.session_state` に質問と回答を保持し、次の質問に会話履歴を引き継げるようにしています。
+
+```python
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+if "use_chat_history" not in st.session_state:
+    st.session_state.use_chat_history = True
+```
+
+- **単発RAG**: その時点の質問と検索結果だけで回答する
+- **対話型RAG**: 前の質問と回答も参考にして次の質問へつなげる
+- Streamlit は操作のたびに再実行されるため、`st.session_state` に状態を持たせることが重要
+- この設計で、LangChainにおけるメモリ的な考え方を体験できる
+
+#### 履歴ON/OFFの切り替え
+```python
+use_chat_history = st.checkbox(
+    "🧠 会話履歴を使う",
+    value=st.session_state.use_chat_history
+)
+```
+
+- ON にすると、直近の質問と回答を次の質問に活かせる
+- OFF にすると、従来どおり単発RAGとして動作する
+- 同じ質問でも、履歴の有無で回答が変わることを確認できる
+
+#### 会話履歴の保存
+```python
+if st.session_state.use_chat_history:
+    st.session_state.chat_history.append({
+        "question": question,
+        "answer": answer
+    })
+```
+
+- 回答生成後に、その質問と回答を履歴へ追加する
+- これにより、次の質問で前提を省略した聞き方ができる
+- 例: 1回目「リモートワークは何日まで可能？」→ 2回目「その申請方法は？」
+
+#### 会話履歴の表示
+```python
+if st.session_state.chat_history:
+    st.subheader("🗂️ 会話履歴")
+```
+
+- UIに履歴一覧を表示することで、どの会話が次に影響するか確認しやすい
+- 学習用アプリとして、状態管理が見えることに価値がある
+
+### 9. LangChainコンポーネントマップ
 | 機能 | LangChain部品 | 使用関数 |
 |------|---------------|----------|
 | 読み込み | `Document` | `read_uploaded_file()` |
@@ -209,19 +284,22 @@ splitter_type = st.selectbox(
 | ベクトルDB | `Chroma` | `build_vectorstore()` |
 | 検索 | `similarity_search_with_score()` | `answer_question()` |
 | プロンプト切替 | `ChatPromptTemplate` | `get_prompt_template()` |
+| 会話履歴整形 | - | `format_chat_history()` |
 | LLM | `ChatOpenAI` | `answer_question()` |
-| チェーン | `prompt \| llm` | `answer_question()` |
+| チェーン | `prompt | llm` | `answer_question()` |
+| 状態管理 | `st.session_state` | UI全体 |
 
-### 9. 実行フロー（UI連携）
+### 10. 実行フロー（UI連携）
 1. 左カラムでファイルを選択し、`read_uploaded_file()` で読み込む
 2. 分割方式、`chunk_size`、`chunk_overlap` を設定する
 3. `build_vectorstore()` で分割・埋め込み・保存を行う
 4. 必要に応じて分割方式比較を表示し、チャンク数やチャンク内容の違いを確認する
 5. 右カラムで質問、検索件数 `k`、プロンプトタイプを指定する
-6. `answer_question(question, k, prompt_type)` を実行する
-7. 回答、検索根拠、類似度スコアを表示する
+6. 必要に応じて会話履歴ON/OFFを切り替える
+7. `answer_question(question, k, prompt_type, chat_history)` を実行する
+8. 回答、会話履歴、検索根拠、類似度スコアを表示する
 
-### 10. 学習価値
+### 11. 学習価値
 このコードでは、RAGとLangChainの標準的な構成を一通り学べます。
 
 - Load → Split → Store（Indexing）
@@ -233,8 +311,11 @@ splitter_type = st.selectbox(
 - 類似度スコアによる検索品質の可視化
 - プロンプト切り替えによる回答スタイルの比較
 - 分割方式によるチャンク設計の比較
+- `st.session_state` を使った会話状態管理
+- 単発RAGと対話型RAGの違いの理解
+- 将来的な LangGraph 状態遷移設計への接続
 
-### 11. プロンプトの役割
+### 12. プロンプトの役割
 
 #### 1. 役割定義
 「あなたは初心者にもわかりやすく説明する親切なAIアシスタントです」
@@ -244,11 +325,12 @@ splitter_type = st.selectbox(
 
 #### 2. ハルシネーション防止
 ```text
-以下の参考文脈だけを使って質問に答えてください
+以下の参考文脈だけを主な根拠として使って質問に答えてください
+会話履歴は文脈補完のために参照して構いません
 ```
 
 - LLMの内部知識だけで推測回答するのを防ぐ
-- 検索結果に基づく回答へ寄せる
+- 検索結果を主根拠にしつつ、会話履歴で文脈補完する
 
 #### 3. 正直さの強制
 ```text
@@ -259,11 +341,16 @@ splitter_type = st.selectbox(
 - RAGの信頼性を高める
 
 #### 4. 動的変数埋め込み
+- `{chat_history}` ← 会話履歴
 - `{context}` ← 検索結果
 - `{question}` ← ユーザー質問
 
 ```python
-chain.invoke({"context": context_text, "question": question})
+chain.invoke({
+    "chat_history": history_text,
+    "context": context_text,
+    "question": question
+})
 ```
 
 #### 5. LangChainチェーン連携
@@ -274,10 +361,10 @@ chain = prompt | llm
 ```text
 テンプレート → LLM → 回答
     ↓
-context と question を流し込んで自然言語回答を得る
+chat_history と context と question を流し込んで自然言語回答を得る
 ```
 
-### 12. プロンプト切り替えで学べること
+### 13. プロンプト切り替えで学べること
 プロンプト切り替え機能を入れると、Retriever は同じでも Prompt によって最終出力が変わることを体験できます。
 
 たとえば同じ検索結果に対しても、次のように出力の形が変わります。
@@ -288,7 +375,7 @@ context と question を流し込んで自然言語回答を得る
 
 これは、検索設計と回答設計の役割分担を理解するうえで重要です。
 
-### 13. 分割方式比較で学べること
+### 14. 分割方式比較で学べること
 分割方式比較機能を入れると、**同じ文書でも Splitter によってチャンク境界やチャンク数が変わる** ことを体験できます。
 
 たとえば次のような違いを観察できます。
@@ -299,17 +386,59 @@ context と question を流し込んで自然言語回答を得る
 
 これは、検索品質が Embedding や LLM だけでなく、**前処理の分割設計** にも強く依存することを理解するうえで重要です。
 
-### 14. 実際の動作フロー
+### 15. 会話履歴つきQ&Aで学べること
+会話履歴機能を入れると、**単発RAGと対話型RAGの違い** を体験できます。
+
+たとえば次のような確認ができます。
+
+- 履歴OFF: 「その申請方法は？」のような省略質問には弱い
+- 履歴ON: 直前の質問を踏まえて回答しやすくなる
+- 状態管理がないと、Streamlit再実行時に会話文脈が消える
+
+これは、LangChainでのメモリ的な考え方を理解する入口になり、将来的に LangGraph での状態管理へつながります。
+
+
+### 16. 会話履歴あり・なしの回答例
+架空企業の社内ハンドブックを入力し、次の2つの質問を順番に行ったときの比較例です。
+
+1. `リモートワークは何日まで可能？`
+2. `その根拠は？`
+
+この例では、2つ目の質問が前の質問内容を前提にしているため、会話履歴の有無によって回答のしやすさが変わります。
+
+- **会話履歴あり**: 1つ前の質問「リモートワークは何日まで可能？」を踏まえて、「その根拠は？」が何を指しているか補完しやすい
+- **会話履歴なし**: 2つ目の質問だけでは対象が曖昧になりやすく、単発RAGとしては前提不足になりやすい
+
+#### 会話履歴ありの例
+
+<p align="center">
+  <img src="./images/会話履歴あり_回答例.png.png" alt="会話履歴あり_回答例" width="900">
+</p>
+
+#### 会話履歴なしの例
+
+<p align="center">
+  <img src="./images/会話履歴なし_回答例.png.png" alt="会話履歴なし_回答例" width="900">
+</p>
+
+この比較により、会話履歴を持たせることで、**文脈を引き継いだ質問応答** がしやすくなることを確認できます。
+また、単発RAGでは質問ごとに前提を明示する必要がある一方、対話型RAGでは状態管理によって自然なやりとりに近づけられることが分かります。
+
+### 17. 実際の動作フロー
 ```python
 1. split_documents(documents, splitter_type, chunk_size, chunk_overlap) → split_docs
 2. Chroma.from_documents(split_docs, embeddings, persist_directory=...)
 3. similarity_search_with_score(question, k=k) → retrieved_results
-4. context_text = "\n\n".join(doc.page_content for doc in retrieved_docs)
-5. prompt = get_prompt_template(prompt_type)
-6. chain.invoke({"context": context_text, "question": question})
+4. context_text = "
+
+".join(doc.page_content for doc in retrieved_docs)
+5. history_text = format_chat_history(chat_history or [], max_turns=3)
+6. prompt = get_prompt_template(prompt_type)
+7. chain.invoke({"chat_history": history_text, "context": context_text, "question": question})
 ```
 
 ```text
+会話履歴: [直近の質問と回答]
 参考文脈: [検索結果]
 質問: [ユーザー質問]
 プロンプト: [選択中のスタイル]
@@ -317,17 +446,19 @@ context と question を流し込んで自然言語回答を得る
 GPT → 回答
 ```
 
-### 15. なぜこの設計か
+### 18. なぜこの設計か
 ```text
 一般LLM → 推測回答しがち
 ↓
 RAGプロンプト → 検索結果限定で回答
 ↓
+さらに会話履歴追加 → 前提を引き継いだ対話が可能
+↓
 さらにプロンプト切替 → 回答スタイルも制御可能
 ↓
 さらに分割方式比較 → 前処理の影響も確認可能
 ↓
-信頼性向上 + 根拠明確化 + 表現調整
+信頼性向上 + 根拠明確化 + 表現調整 + 状態管理学習
 ```
 
-この設計は、RAGの信頼性を保ちながら、用途に応じて回答の見せ方や前処理の違いまで学べる構成です。
+この設計は、RAGの信頼性を保ちながら、用途に応じて回答の見せ方や前処理の違いだけでなく、会話状態の扱いまで学べる構成です。
