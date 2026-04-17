@@ -1,25 +1,48 @@
 repos:
-- repo: https://github.com/pre-commit/pre-commit-hooks
-  rev: v5.0.0
-  hooks:
-  - id: trailing-whitespace
-  - id: end-of-file-fixer
-  - id: check-yaml
-  - id: check-added-large-files
+  # 基本的なファイル品質チェックを行う標準フック群
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      # 行末の不要な空白を削除する
+      - id: trailing-whitespace
 
-- repo: https://github.com/PyCQA/isort
-  rev: 5.13.2
-  hooks:
-  - id: isort
-    args: ["--profile", "black", "--line-length", "88", "--filter-files"]
+      # ファイル末尾に改行が1つ入るように自動修正する
+      - id: end-of-file-fixer
 
-- repo: https://github.com/psf/black
-  rev: 24.10.0
-  hooks:
-  - id: black
+      # YAMLファイルの構文エラーをチェックする
+      - id: check-yaml
 
-- repo: https://github.com/PyCQA/flake8
-  rev: 7.1.1
-  hooks:
-  - id: flake8
-    args: ["--max-line-length=88", "--extend-ignore=E203"]
+      # 大きすぎるファイルの誤コミットを防ぐ
+      - id: check-added-large-files
+
+  # import文の順序を自動整列する
+  - repo: https://github.com/PyCQA/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        args:
+          # black互換の並び順・整形ルールを使う
+          - "--profile"
+          - "black"
+          # 1行の最大文字数をblackに合わせる
+          - "--line-length"
+          - "88"
+          # 対象ファイルのみを処理する
+          - "--filter-files"
+
+  # Pythonコードを自動整形する
+  - repo: https://github.com/psf/black
+    rev: 24.10.0
+    hooks:
+      - id: black
+
+  # Pythonコードの文法・スタイル違反をチェックする
+  - repo: https://github.com/PyCQA/flake8
+    rev: 7.1.1
+    hooks:
+      - id: flake8
+        args:
+          # blackに合わせて1行の最大文字数を88にする
+          - "--max-line-length=88"
+          # blackと競合しやすいE203は無視する
+          - "--extend-ignore=E203"
