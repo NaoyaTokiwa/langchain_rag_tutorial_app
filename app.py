@@ -7,6 +7,7 @@
 
 import os
 import shutil
+import uuid
 from pathlib import Path
 from typing import TypedDict
 
@@ -38,7 +39,7 @@ load_dotenv()
 # アプリの基本設定（タイトル、アイコン、レイアウト）を定義します。
 
 APP_TITLE = "📚 LangChainで学ぶRAGチュートリアル"
-PERSIST_DIR = Path("chroma_db")  # ベクトルDB保存フォルダ
+PERSIST_ROOT_DIR = Path("chroma_db")  # ベクトルDB保存フォルダ
 PROMPT_TYPES = ["初心者向け", "要約重視", "箇条書き重視"]
 SPLITTER_TYPES = ["RecursiveCharacterTextSplitter", "CharacterTextSplitter"]
 SESSION_DEFAULTS = {
@@ -56,6 +57,7 @@ SESSION_DEFAULTS = {
     "chat_history": [],
     "use_chat_history": True,
     "rag_graph": None,
+    "persist_dir": None,
 }
 
 st.set_page_config(page_title="LangChain RAG Tutorial", page_icon="📚", layout="wide")
@@ -156,6 +158,33 @@ def split_documents(documents, splitter_type, chunk_size, chunk_overlap):
 
 
 # ============================================
+# 補助関数：永続化先作成
+# ============================================
+def create_persist_dir():
+    """Chromaの永続化先ディレクトリを都度作成"""
+    PERSIST_ROOT_DIR.mkdir(exist_ok=True)
+    persist_dir = PERSIST_ROOT_DIR / f"index_{uuid.uuid4().hex}"
+    persist_dir.mkdir(parents=True, exist_ok=True)
+    return persist_dir
+
+
+# ============================================
+# 補助関数：古いインデックスのクリーンアップ
+# ============================================
+def cleanup_old_persist_dirs(current_persist_dir=None):
+    """現在使用中以外の古い永続化先を削除"""
+    if not PERSIST_ROOT_DIR.exists():
+        return
+
+    for path in PERSIST_ROOT_DIR.iterdir():
+        if not path.is_dir():
+            continue
+        if current_persist_dir is not None and path == current_persist_dir:
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+
+
+# ============================================
 # 補助関数：ベクトルDB作成（Split + Store）
 # ============================================
 # RAGの前処理「文書分割→埋め込み→保存」です。
@@ -175,14 +204,13 @@ def build_vectorstore(
         splitter_type: 分割方式
 
     Returns:
-        tuple: (vectorstore, 分割済みドキュメント)
+        tuple: (vectorstore, 分割済みドキュメント, 永続化先ディレクトリ)
     """
     # Step1: 文書分割（長い文章を小さく分割）
     split_docs = split_documents(documents, splitter_type, chunk_size, chunk_overlap)
 
-    # Step2: 前回のデータは削除（学習用に毎回作り直し）
-    if PERSIST_DIR.exists():
-        shutil.rmtree(PERSIST_DIR)
+    # Step2: 新しい永続化先を作成（既存DBは削除せず切り替える）
+    persist_dir = create_persist_dir()
 
     # Step3: 埋め込みモデル作成（文章→数値ベクトル変換）
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
@@ -191,10 +219,10 @@ def build_vectorstore(
     vectorstore = Chroma.from_documents(
         documents=split_docs,
         embedding=embeddings,
-        persist_directory=str(PERSIST_DIR),  # ディスク保存
+        persist_directory=str(persist_dir),  # ディスク保存
     )
 
-    return vectorstore, split_docs
+    return vectorstore, split_docs, persist_dir
 
 
 # ============================================
@@ -303,6 +331,7 @@ class RAGState(TypedDict):
     retrieved_results: list
     answer: str
     search_query: str
+    persist_dir: str
 
 
 # ============================================
@@ -360,7 +389,7 @@ def retrieve_node(state: RAGState):
         dict: 更新する状態
     """
     vectorstore = Chroma(
-        persist_directory=str(PERSIST_DIR),
+        persist_directory=state["persist_dir"],
         embedding_function=OpenAIEmbeddings(model="text-embedding-3-small"),
     )
 
@@ -450,6 +479,9 @@ def answer_question(question, k, prompt_type, chat_history=None):
     if st.session_state.rag_graph is None:
         st.session_state.rag_graph = build_rag_graph()
 
+    if st.session_state.persist_dir is None:
+        raise ValueError("ベクトルDBが未作成です。先にインデックスを作成してください。")
+
     initial_state = {
         "question": question,
         "k": k,
@@ -459,6 +491,7 @@ def answer_question(question, k, prompt_type, chat_history=None):
         "retrieved_results": [],
         "answer": "",
         "search_query": question,
+        "persist_dir": str(st.session_state.persist_dir),
     }
 
     result = st.session_state.rag_graph.invoke(initial_state)
@@ -674,12 +707,16 @@ def handle_index_creation(uploaded_file, chunk_size, chunk_overlap):
             # 1. ファイル読み込み
             docs = read_uploaded_file(uploaded_file)
 
-            # 2. 分割＆ベクトルDB作成
-            _, split_docs = build_vectorstore(
+            # 2. 古い状態を解除
+            st.session_state.rag_graph = None
+            st.session_state.persist_dir = None
+
+            # 3. 分割＆ベクトルDB作成
+            _, split_docs, persist_dir = build_vectorstore(
                 docs, chunk_size, chunk_overlap, st.session_state.splitter_type
             )
 
-            # 3. 状態更新
+            # 4. 状態更新
             st.session_state.update(
                 {
                     "vectorstore_ready": True,
@@ -687,8 +724,12 @@ def handle_index_creation(uploaded_file, chunk_size, chunk_overlap):
                     "last_answer": "",
                     "last_retrieved_docs": [],
                     "last_retrieved_results": [],
+                    "persist_dir": persist_dir,
                 }
             )
+
+            # 5. 現在使用中以外の古いインデックスを削除
+            cleanup_old_persist_dirs(current_persist_dir=persist_dir)
 
         st.success(f"✅ 完了！チャンク数: **{len(split_docs)}**件")
         st.balloons()  # 成功エフェクト
@@ -768,14 +809,14 @@ with left_col:
             "📏 チャンクサイズ",
             300,
             1500,
-            700,
+            600,
             100,
             help="1チャンクの文字数（大きい=文脈多め、小さい=細かい検索）",
         )
 
     with col2:
         chunk_overlap = st.slider(
-            "🔗 重なり幅", 0, 300, 100, 20, help="チャンク間の重なり（文脈切れを防ぐ）"
+            "🔗 重なり幅", 0, 300, 60, 20, help="チャンク間の重なり（文脈切れを防ぐ）"
         )
 
     # インデックス作成ボタン
