@@ -260,10 +260,38 @@ return "finalize"
 graph_builder.add_node("agent", tool_calling_llm_node)
 graph_builder.add_node("tool_execution", tool_execution_node)
 graph_builder.add_node("finalize", tool_calling_finalize_node)
+
+graph_builder.add_edge(START, "agent")
+graph_builder.add_conditional_edges(
+    "agent",
+    should_continue_tool_calling,
+    {
+        "tool_execution": "tool_execution",
+        "finalize": "finalize",
+    },
+)
+graph_builder.add_edge("tool_execution", "agent")
+graph_builder.add_edge("finalize", END)
 ```
 
-- Function Calling RAG は、`agent -> tool_execution -> agent -> finalize` の流れで構成されています。
-- 通常RAGのように検索フローを固定せず、LLM が必要に応じてツールを選ぶのが特徴です。
+- `add_node()` は処理ノードの登録、`add_edge(A, B)` は「Aの次にBへ進む」という固定ルート定義です。
+- `add_edge(START, "agent")` は開始時に最初のノードとして `agent` を実行する、`add_edge("tool_execution", "agent")` はツール実行後にもう一度 LLM 判断へ戻す、`add_edge("finalize", END)` は最終回答後に終了する、という意味です。
+- `agent` の次だけは固定ではないため `add_conditional_edges()` を使い、`should_continue_tool_calling()` が `"tool_execution"` を返せばツール実行へ、`"finalize"` を返せば終了処理へ進みます。
+- そのため Function Calling RAG 全体は、`START -> agent -> (tool_execution -> agent を必要なだけ繰り返す) -> finalize -> END` という状態遷移になります。
+
+```
+### Function Calling のグラフ
+START
+  ↓
+agent
+  ├─ tool_callsあり → tool_execution
+  │                     ↓
+  │                   agent に戻る
+  │
+  └─ tool_callsなし → finalize
+                        ↓
+                       END
+```
 
 ### 8. 実行フロー
 1. 文書をアップロードして `build_vectorstore()` を実行する。
