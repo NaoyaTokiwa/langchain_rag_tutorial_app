@@ -260,7 +260,7 @@ streamlit run app.py
 - Function Calling(Tool Callingの一種)
     - ~~Tool Calling：LLM が必要に応じて外部ツールを選んで実行し、その結果を使って最終回答を作る仕組み~~
     - ~~LLMが必要に応じてPython関数や外部処理を呼び出せるようにし、文書検索・履歴要約・条件分岐をより柔軟に制御できる構成を学べるようにする。~~
-- Query Routing
+- Query Routing  --> 実装済み
     - 質問内容に応じて、文書検索・Web検索・通常応答など最適な処理経路へ分岐し、精度と効率の両立を学べるようにする。
 - History Compression
     - 長い会話履歴を要約して保持し、トークン消費を抑えながら対話の一貫性を保つ手法を学べるようにする。
