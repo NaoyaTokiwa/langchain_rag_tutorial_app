@@ -2,7 +2,7 @@
 
 LangChain、LangGraph、Streamlit を使って、RAG（Retrieval-Augmented Generation）の基本を学べる初心者向けチュートリアルアプリです。
 
-このアプリでは、文書のアップロード、チャンク分割、埋め込み、ベクトルDB保存、検索、回答生成までの流れを、UIで確認しながら体験できます。加えて、検索件数 `k`、プロンプトタイプ、分割方式、**LangGraph を用いた会話履歴つきQ&A** を切り替えながら、RAGの設計ポイントを比較学習できます。
+このアプリでは、文書のアップロード、チャンク分割、埋め込み、ベクトルDB保存、検索、回答生成までの流れを、UIで確認しながら体験できます。加えて、検索件数 `k`、プロンプトタイプ、分割方式、**LangGraph を用いた会話履歴つきQ&A**、**Function Calling（Tool Calling）を用いたRAG** を切り替えながら、RAGの設計ポイントを比較学習できます。
 
 ⚠️本来であれば`app.py`を`config.py`や`ui.py`など役割ごとに分割する構成にする方が望ましいが、生成AI活用した修正が行いやすいように1つのファイルにて管理
 
@@ -16,6 +16,9 @@ LangChain、LangGraph、Streamlit を使って、RAG（Retrieval-Augmented Gener
 - 「初心者向け」「要約重視」「箇条書き重視」のプロンプト切り替え
 - 会話履歴あり / なし を切り替えて、単発RAGと対話型RAGを比較
 - LangGraph の `rewrite_query -> retrieve -> generate` フローを使った会話履歴つきQ&A
+- `通常RAG` と `Function Calling RAG` の実行モード比較
+- `search_documents_tool()` / `summarize_history_tool()` を使った Tool Calling の学習
+- Tool Callingログを見ながら、LLM がどのツールを呼んだか確認
 - 検索根拠、会話履歴、最終回答を同じ画面で確認
 
 ## RAGの流れ
@@ -23,14 +26,21 @@ LangChain、LangGraph、Streamlit を使って、RAG（Retrieval-Augmented Gener
 ```text
 文書読み込み → 分割 → 埋め込み → ベクトルDB保存
 
+通常RAG:
 質問入力 → LangGraphで質問補完 → 類似検索 → 根拠取得 → LLM回答生成
                          ↑
                    会話履歴を参照
+
+Function Calling RAG:
+質問入力 → agent(LLM) → 必要に応じてTool Calling → tool_execution → agent(LLM) → finalize
+                               ↓
+               search_documents_tool / summarize_history_tool
 ```
 
 - LLM単体では、学習済み知識だけを頼りに回答します。
 - RAGでは、アップロードした文書を検索して、その内容を参考に回答します。
 - このアプリでは、さらに LangGraph を使って会話履歴を検索前段にも反映し、曖昧な follow-up 質問を補完してから検索します。
+- また、Function Calling RAG では、LLM が必要に応じて `search_documents_tool()` や `summarize_history_tool()` を選び、ツール結果を使って最終回答を作る流れも学べます。
 
 ## 学習ポイント
 
@@ -59,6 +69,14 @@ LangChain、LangGraph、Streamlit を使って、RAG（Retrieval-Augmented Gener
 - 会話履歴ONでは、前の質問と回答を `st.session_state` に保持しつつ、LangGraph の `rewrite_query_node()` で検索用質問へ補完します。
 - その後 `retrieve_node()` で補完済みクエリ検索、`generate_node()` で回答生成を行います。
 - これにより、単発RAGと対話型RAGの違いだけでなく、**検索前に文脈補完する重要性** も学べます。
+
+### 5. Function Calling（Tool Calling）の学習
+
+- 実行モードを `Function Calling RAG` に切り替えると、LLM が必要に応じてツールを選択します。
+- `search_documents_tool()` はベクトルDBを検索し、検索根拠を返します。
+- `summarize_history_tool()` は直近の会話履歴を要約し、follow-up 質問の補助に使えます。
+- LangGraph では `agent -> tool_execution -> agent -> finalize` という流れで、LLM とツール実行を分離して学べます。
+- UI の Tool Callingログから、どのツールがどんな引数で呼ばれたか確認できます。
 
 ## アプリ画面
 
@@ -97,6 +115,17 @@ LangChain、LangGraph、Streamlit を使って、RAG（Retrieval-Augmented Gener
 <p align="center">
   <img src="./images/会話履歴なし_回答例.png" alt="会話履歴なし_回答例" width="900">
 </p>
+
+#### Tool Callingの動作確認例
+
+以下は、`リモートワークが週に何回可能か?` と質問した後に、`新入社員に対してはどうか?` と聞いた際の結果です。
+
+<p align="center">
+  <img src="images/Tool_function動作確認例.png" alt="Tool Calling動作確認例" width="900">
+</p>
+
+- Function Calling RAG では、LLM が必要に応じて `search_documents_tool()` や `summarize_history_tool()` を呼び出します。
+- 前の質問内容を踏まえつつ、ツール結果を根拠に次の回答を作る流れを確認できます。
 
 ### 他の回答例
 
@@ -203,10 +232,11 @@ streamlit run app.py
 2. 分割方式、`chunk_size`、`chunk_overlap` を設定します。
 3. 「🚀 インデックス作成」を押します。
 4. 必要に応じて分割結果や分割方式比較を確認します。
-5. 右カラムで検索件数 `k`、プロンプトタイプ、会話履歴ON/OFFを設定します。
-6. 質問を入力して「🤖 回答生成」を押します。
-7. 会話履歴ONの場合、LangGraph が検索用クエリを補完してから検索します。
-8. 最終回答、会話履歴、検索根拠、類似度スコアを確認します。
+5. 右カラムで検索件数 `k`、プロンプトタイプ、実行モード、会話履歴ON/OFFを設定します。
+6. 実行モードを `通常RAG` にすると、LangGraph の `rewrite_query -> retrieve -> generate` フローで回答します。
+7. 実行モードを `Function Calling RAG` にすると、LLM が `search_documents_tool()` や `summarize_history_tool()` を必要に応じて呼び出します。
+8. 質問を入力して「🤖 回答生成」を押します。
+9. 最終回答、会話履歴、検索根拠、類似度スコア、必要に応じて Tool Callingログを確認します。
 
 ## 注意点
 

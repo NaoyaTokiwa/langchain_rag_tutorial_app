@@ -3,6 +3,8 @@
 ### 1. RAG全体フロー
 ```text
 📄 Load → ✂️ Split → 🔢 Embed → 🗄️ Store
+
+通常RAG
                                   ↓
                            質問入力(question)
                                   ↓
@@ -13,10 +15,23 @@
                             retrieve → context
                                   ↓
                             generate → answer
+
+Function Calling RAG
+                                  ↓
+                           質問入力(question)
+                                  ↓
+                            agent(LLM)
+                                  ↓
+                tool_execution ← tool_calls の有無を判定
+                     ↓                            ↑
+ search_documents_tool / summarize_history_tool   │
+                     ↓                            │
+                            finalize ←───────────┘
 ```
 
 このアプリでは、会話履歴機能を `st.session_state` による単純な履歴保持だけでなく、**LangGraph の状態遷移** を使って実装しています。
 特に、曖昧な follow-up 質問をそのまま検索せず、`rewrite_query_node()` で **検索向けの具体的な質問文へ補完** してから Retrieve するのが重要な変更点です。
+加えて、Function Calling RAG では、LLM が必要に応じてツールを選び、ツール結果を使って最終回答を作る流れも学べます。
 
 ### 2. 補助関数・ノード一覧
 | 関数名 | 役割 | 主なコンポーネント | フェーズ |
@@ -32,6 +47,14 @@
 | `generate_node()` | 会話履歴 + 検索文脈で回答生成 | `ChatPromptTemplate`, `ChatOpenAI` | Generate |
 | `build_rag_graph()` | LangGraph の実行フロー構築 | `StateGraph` | Orchestration |
 | `answer_question()` | 初期状態を渡して LangGraph 実行 | `CompiledStateGraph` | Execute |
+| `search_documents_tool()` | ベクトルDBを検索して根拠テキストを返す | `@tool`, `Chroma` | Tool Calling |
+| `summarize_history_tool()` | 直近の会話履歴を整形して返す | `@tool` | Tool Calling |
+| `tool_calling_llm_node()` | LLMが必要に応じてツール呼び出しを判断 | `ChatOpenAI.bind_tools` | Agent |
+| `tool_execution_node()` | LLMが要求したツールを実行 | `ToolMessage` | Tool Execution |
+| `tool_calling_finalize_node()` | 最終回答を state に格納 | - | Finalize |
+| `should_continue_tool_calling()` | Tool Calling継続可否を判定 | - | Routing |
+| `build_tool_calling_graph()` | Function Calling 用 LangGraph を構築 | `StateGraph` | Orchestration |
+| `answer_question_with_tool_calling()` | Function Calling RAG を実行 | `CompiledStateGraph` | Execute |
 
 ### 3. LangGraph 化した会話履歴機能
 
@@ -168,7 +191,81 @@ answer
 - `rewrite_query_node()` がそれを参照して質問を具体化します。
 - `generate_node()` も会話文脈を見ながら回答します。
 
-### 7. 実行フロー
+### 7. Function Calling（Tool Calling）の構成
+
+#### `ToolCallingState` - Function Calling用の状態定義
+```python
+class ToolCallingState(TypedDict):
+    question: str
+    prompt_type: str
+    chat_history: list
+    answer: str
+    tool_trace: list
+    messages: list
+```
+
+- `messages` を state に持たせることで、`AIMessage` と `ToolMessage` の往復を LangGraph 上で追跡できます。
+- `tool_trace` は UI の Tool Callingログ表示に使い、どのツールが呼ばれたかを確認するための状態です。
+
+#### `search_documents_tool()` - 文書検索ツール
+```python
+@tool
+def search_documents_tool(query: str) -> str:
+```
+
+- ベクトルDBに対して類似検索を行い、関連チャンクを根拠テキストとして返します。
+- Function Calling RAG では、LLM が「検索が必要」と判断したときにこのツールを呼び出します。
+- 実行結果は `last_retrieved_results` にも反映されるため、通常RAGと同じように検索根拠を UI で確認できます。
+
+#### `summarize_history_tool()` - 会話履歴要約ツール
+```python
+@tool
+def summarize_history_tool() -> str:
+```
+
+- 直近の会話履歴を短く整形して返します。
+- 省略された follow-up 質問に対し、LLM が履歴要約を必要と判断した場合に使えます。
+
+#### `tool_calling_llm_node()` - ツール呼び出し判断
+```python
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0).bind_tools(TOOLS)
+```
+
+- `bind_tools(TOOLS)` によって、LLM が `search_documents_tool()` と `summarize_history_tool()` を選択できるようにしています。
+- system prompt では、ツール結果を根拠に回答すること、根拠不足なら「わかりません」と答えることを明示しています。
+
+#### `tool_execution_node()` - ツール実行
+```python
+for tool_call in getattr(last_message, "tool_calls", []):
+    tool_name = tool_call["name"]
+    tool_args = tool_call.get("args", {})
+    tool_result = tool_map[tool_name].invoke(tool_args)
+```
+
+- LLM が返した `tool_calls` を受け取り、対応する Python関数を実行します。
+- 実行結果は `ToolMessage` として `messages` に追加し、再び LLM へ戻します。
+
+#### `should_continue_tool_calling()` - 条件分岐
+```python
+if getattr(last_message, "tool_calls", None):
+    return "tool_execution"
+return "finalize"
+```
+
+- LLM がツール呼び出しを返した場合は `tool_execution` へ進みます。
+- 返していない場合は、そのまま `finalize` に進んで最終回答を確定します。
+
+#### `build_tool_calling_graph()` - 状態遷移
+```python
+graph_builder.add_node("agent", tool_calling_llm_node)
+graph_builder.add_node("tool_execution", tool_execution_node)
+graph_builder.add_node("finalize", tool_calling_finalize_node)
+```
+
+- Function Calling RAG は、`agent -> tool_execution -> agent -> finalize` の流れで構成されています。
+- 通常RAGのように検索フローを固定せず、LLM が必要に応じてツールを選ぶのが特徴です。
+
+### 8. 実行フロー
 1. 文書をアップロードして `build_vectorstore()` を実行する。
 2. ユーザーが質問を入力する。
 3. `answer_question()` が `initial_state` を作る。
@@ -178,7 +275,7 @@ answer
 7. `generate_node()` が会話履歴と検索結果を使って回答する。
 8. 回答と検索根拠を UI に表示する。
 
-### 8. 学習価値
+### 9. 学習価値
 
 この実装で学べることは次の通りです。
 
