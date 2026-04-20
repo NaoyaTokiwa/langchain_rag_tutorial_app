@@ -257,10 +257,10 @@ streamlit run app.py
 - 会話履歴つきQ&A --> 実装済み
   - ~~answer_question(question) は単発質問だが、会話履歴を st.session_state に持たせて、前の質問と回答を参考に次の質問へつなげると、LangChainでのメモリ的な考え方を学べる。単発RAGと対話型RAGの違い、状態管理の重要性、将来的なLangGraph拡張を予定。~~
 - LangGraphを用いた会話履歴つきQ&A --> 実装済み
-- Function Calling(Tool Callingの一種)
+- Function Calling(Tool Callingの一種)  --> 実装済み
     - ~~Tool Calling：LLM が必要に応じて外部ツールを選んで実行し、その結果を使って最終回答を作る仕組み~~
     - ~~LLMが必要に応じてPython関数や外部処理を呼び出せるようにし、文書検索・履歴要約・条件分岐をより柔軟に制御できる構成を学べるようにする。~~
-- Query Routing  --> 実装済み
+- Query Routing
     - 質問内容に応じて、文書検索・Web検索・通常応答など最適な処理経路へ分岐し、精度と効率の両立を学べるようにする。
 - History Compression
     - 長い会話履歴を要約して保持し、トークン消費を抑えながら対話の一貫性を保つ手法を学べるようにする。
