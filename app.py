@@ -336,11 +336,11 @@ def format_chat_history(chat_history, max_turns=3):
 # ============================================
 # Query Routing用の補助関数
 # ============================================
-# Query Routingでは、質問内容に応じて
-# 「文書検索を使うべきか」「Web検索を使うべきか」「通常応答でよいか」を
-# 先に判定してから、適切な処理経路へ分岐させる。
-# このような設計にすると、不要な検索を減らしつつ、
-# 必要なときだけ外部知識を使えるため、精度と効率のバランスを学びやすい。
+# 質問内容に応じて、
+# - document: アップロード文書を検索して答える
+# - web: 外部情報をもとに答える
+# - general: 検索せず通常応答する
+# の3ルートへ振り分ける。
 
 
 def classify_route_with_llm(question, chat_history):
@@ -354,9 +354,13 @@ def classify_route_with_llm(question, chat_history):
     Returns:
         str: "document", "web", "general" のいずれか
     """
+    # 分類ぶれを減らしたいので temperature=0 にする
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+    # 曖昧な follow-up 質問も判定しやすいように履歴を渡す
     history_text = format_chat_history(chat_history, max_turns=3)
 
+    # 3つの候補から1語だけ返すよう明示して、後続の条件分岐を安定させる
     prompt = ChatPromptTemplate.from_template(
         """
 あなたは質問のルーティング判定アシスタントです。
@@ -410,6 +414,8 @@ def search_web_context(question):
     """
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
+    # 学習用として、外部情報の「調査メモ」を先に作る
+    # 実運用ではここを検索API呼び出しに置き換えやすい
     prompt = ChatPromptTemplate.from_template(
         """
 あなたはWeb検索結果要約アシスタントです。
@@ -445,6 +451,7 @@ def general_answer_node_response(question, prompt_type, chat_history):
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
     history_text = format_chat_history(chat_history, max_turns=3)
 
+    # general ルートでは検索を使わず、そのまま回答スタイルに沿って返す
     prompt = ChatPromptTemplate.from_template(
         """
 あなたは親切なAIアシスタントです。
@@ -470,8 +477,7 @@ def general_answer_node_response(question, prompt_type, chat_history):
 
 
 # Query Routing用の状態。
-# route に分類結果を保持し、その後の条件分岐で
-# document / web / general のどこへ進むかを制御する。
+# route に分類結果を持たせ、条件分岐で各ルートへ流す。
 class QueryRoutingState(TypedDict):
     question: str
     k: int
@@ -674,21 +680,12 @@ def generate_node(state: RAGState):
 # ============================================
 # Query Routing用ノード
 # ============================================
-# 最初に質問を分類し、その結果を route に保存する。
-# LangGraph の conditional edge と組み合わせることで、
-# 分類結果に応じて後続ノードを動的に切り替えられる。
+# 最初に質問を分類し、その結果に応じて
+# document / web / general の処理へ分岐する。
 
 
 def route_question_node(state: QueryRoutingState):
-    """
-    質問内容から経路を判定するノード
-
-    Args:
-        state: Query Routing用のLangGraph状態
-
-    Returns:
-        dict: route を含む更新状態
-    """
+    """質問内容から経路を判定するノード"""
     route = classify_route_with_llm(state["question"], state["chat_history"])
     return {"route": route}
 
@@ -703,6 +700,7 @@ def routing_rewrite_query_node(state: QueryRoutingState):
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
     history_text = format_chat_history(state["chat_history"], max_turns=3)
 
+    # 会話の流れを踏まえて、検索しやすい具体的な質問文へ補完する
     prompt = ChatPromptTemplate.from_template(
         """
 あなたは検索用クエリ補完アシスタントです。
@@ -772,6 +770,7 @@ def routing_generate_web_answer_node(state: QueryRoutingState):
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
     history_text = format_chat_history(state["chat_history"], max_turns=3)
 
+    # web ルートでは、事前に作った調査メモを根拠として回答を作る
     prompt = ChatPromptTemplate.from_template(
         """
 あなたは親切なAIアシスタントです。
@@ -824,6 +823,7 @@ def decide_route_after_classification(state: QueryRoutingState):
     if route == "general":
         return "general_answer"
 
+    # 基本は document ルートへ流し、必要なら検索クエリ補完も行う
     return "rewrite_query"
 
 
@@ -1018,8 +1018,7 @@ def build_tool_calling_graph():
 
 
 # Query Routing学習用のLangGraph。
-# まず route_question_node で経路を判定し、
-# その後 document / web / general の各フローへ分岐する。
+# 最初に route を判定し、その結果で後続ノードを切り替える。
 def build_query_routing_graph():
     """
     Query Routing学習用のLangGraphを作成する
@@ -1040,6 +1039,8 @@ def build_query_routing_graph():
     graph_builder.add_node("general_answer", routing_general_answer_node)
 
     graph_builder.add_edge(START, "route_question")
+
+    # route_question の結果に応じて、次に進むノードを切り替える
     graph_builder.add_conditional_edges(
         "route_question",
         decide_route_after_classification,
@@ -1049,11 +1050,14 @@ def build_query_routing_graph():
             "general_answer": "general_answer",
         },
     )
+
     graph_builder.add_edge("rewrite_query", "retrieve")
     graph_builder.add_edge("retrieve", "generate_document_answer")
     graph_builder.add_edge("generate_document_answer", END)
+
     graph_builder.add_edge("web_search", "generate_web_answer")
     graph_builder.add_edge("generate_web_answer", END)
+
     graph_builder.add_edge("general_answer", END)
 
     return graph_builder.compile()
@@ -1064,8 +1068,6 @@ def build_query_routing_graph():
 # ============================================
 # RAGの本番処理「検索→回答生成」です。
 # 「Retrieve→Generate」の流れを実装。
-
-
 def answer_question(question, k, prompt_type, chat_history=None):
     """
     LangGraphを使ってRAGで質問に回答
@@ -1138,8 +1140,7 @@ def answer_question_with_tool_calling(question, prompt_type, chat_history=None):
 
 
 # Query Routing経由の回答生成。
-# route の分類結果も返すことで、UI上で「なぜこの経路になったか」を
-# 確認しやすくしている。
+# 回答に加えて、どの route が選ばれたかも返してUIで可視化する。
 def answer_question_with_query_routing(question, k, prompt_type, chat_history=None):
     """
     Query Routing RAGで質問に回答する
@@ -1153,6 +1154,7 @@ def answer_question_with_query_routing(question, k, prompt_type, chat_history=No
     Returns:
         tuple: (回答文, route, retrieved_results, web_context)
     """
+    # 初回実行時だけLangGraphを構築して保持する
     if st.session_state.routing_graph is None:
         st.session_state.routing_graph = build_query_routing_graph()
 
