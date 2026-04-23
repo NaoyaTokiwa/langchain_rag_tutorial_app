@@ -6,29 +6,27 @@
 # python-dotenv: .envファイル読み込み用
 
 import os
-import shutil  # ファイル操作
-import uuid  # 一意ID生成
-from pathlib import Path  # パス操作
-from typing import TypedDict  # 型付き辞書
+import shutil
+import uuid
+from pathlib import Path
+from typing import TypedDict
 
-import streamlit as st  # WebアプリUI
-from dotenv import load_dotenv  # 環境変数読み込み
-from langchain.prompts import ChatPromptTemplate  # プロンプト作成
-from langchain_community.vectorstores import Chroma  # ベクトルDB
+import streamlit as st
+from dotenv import load_dotenv  # 🔑 .envファイルからAPIキー読み込み
+from langchain.prompts import ChatPromptTemplate  # 💬 LLMへの指示文作成
+from langchain_community.vectorstores import Chroma  # 🗄️ ベクトルデータベース
 
 # LangChain系（RAGの部品箱）
-from langchain_core.documents import Document  # 文書データ型
-from langchain_core.messages import SystemMessage  # メッセージ型
-from langchain_core.messages import HumanMessage, ToolMessage
-from langchain_core.output_parsers import StrOutputParser  # 文字列変換
-from langchain_core.tools import tool  # Tool化デコレータ
-from langchain_openai import ChatOpenAI  # OpenAIチャットモデル
-from langchain_openai import OpenAIEmbeddings  # 埋め込みモデル
-from langchain_text_splitters import CharacterTextSplitter  # 単純分割
-from langchain_text_splitters import RecursiveCharacterTextSplitter  # 再帰分割
+from langchain_core.documents import Document  # 📄 文書データ形式
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI  # 🤖 OpenAI連携（回答生成・埋め込み）
+from langchain_openai import OpenAIEmbeddings
+from langchain_text_splitters import CharacterTextSplitter  # ✂️ 文書分割
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # LangGraph系（状態付き対話フロー）
-from langgraph.graph import END, START, StateGraph  # グラフ制御
+from langgraph.graph import END, START, StateGraph
 
 # ============================================
 # 環境変数読み込み（最初に実行）
@@ -49,8 +47,7 @@ SPLITTER_TYPES = ["RecursiveCharacterTextSplitter", "CharacterTextSplitter"]
 MODE_TYPES = [
     "通常RAG",
     "Function Calling RAG",
-    "LLMルーティング RAG",
-]  # UI上で通常RAG / Function Calling RAG / Query Routing RAG を切り替え
+]  # UI上で通常RAGとFunction Calling RAGを切り替え
 SESSION_DEFAULTS = {
     "vectorstore_ready": False,
     "chunks": [],
@@ -70,9 +67,6 @@ SESSION_DEFAULTS = {
     "tool_calling_graph": None,  # Function Calling 用のLangGraph保持用
     "execution_mode": "通常RAG",  # UI の選択状態
     "last_tool_trace": [],  # ログ表示用
-    "workflow_routing_graph": None,  # LLM Routing 用のLangGraph保持用
-    "last_workflow_route": "",  # LLM Routingで選ばれた経路表示用
-    "last_web_context": "",  # Web検索ルートの参考メモ表示用
 }
 
 st.set_page_config(page_title="LangChain RAG Tutorial", page_icon="📚", layout="wide")
@@ -335,167 +329,6 @@ def format_chat_history(chat_history, max_turns=3):
 
 
 # ============================================
-# LLMによる処理フロー分岐用の補助関数
-# ============================================
-# 質問内容に応じて、
-# - document: アップロード文書を検索して答える
-# - web: 外部情報をもとに答える
-# - general: 検索せず通常応答する
-# の3つの処理フローへ振り分ける。
-
-
-def classify_workflow_route_with_llm(question, chat_history):
-    """
-    質問内容から最適な処理フローを分類する
-
-    Args:
-        question: ユーザーの質問文
-        chat_history: 会話履歴
-
-    Returns:
-        str: "document", "web", "general" のいずれか
-    """
-    # 分類ぶれを減らしたいので temperature=0 にする
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-
-    # 曖昧な follow-up 質問も判定しやすいように履歴を渡す
-    history_text = format_chat_history(chat_history, max_turns=3)
-
-    # 3つの候補から1語だけ返すよう明示して、後続の条件分岐を安定させる
-    prompt = ChatPromptTemplate.from_template(
-        """
-あなたは質問に応じて処理フローを判定するアシスタントです。
-以下の質問を見て、次の3種類のうち最も適切な経路を1語だけで返してください。
-
-選択肢:
-- document: アップロード済み文書の内容を検索すべき質問
-- web: 最新情報、外部情報、一般Web情報を検索すべき質問
-- general: 検索なしで通常のLLM応答で十分な質問
-
-判定ルール:
-- 社内規定、社内文書、アップロード資料、マニュアル、ハンドブックの内容は document
-- 就業規則、人事制度、勤怠、休暇、給与、福利厚生、申請方法、勤務形態、出社頻度、リモートワーク可否など、会社や組織ごとのルールに依存する質問は document
-- 文書にあるか不明でも、「この資料では」「この文書では」「アップロードした内容では」などが含まれるなら document
-- ユーザー質問が短くても、社内制度や社内ルールの確認と解釈できる場合は document を優先
-- 最新ニュース、現在の出来事、外部サービス情報、一般知識の確認は web
-- 文章の言い換え、アイデア出し、概念説明、感想生成、相談は general
-- 時事性がありそうなら web を優先
-
-会話履歴:
-{chat_history}
-
-質問:
-{question}
-
-出力は document / web / general のいずれか1語のみ。
-"""
-    )
-
-    chain = prompt | llm | StrOutputParser()
-    route = (
-        chain.invoke({"chat_history": history_text, "question": question})
-        .strip()
-        .lower()
-    )
-
-    if route not in ["document", "web", "general"]:
-        return "document"
-
-    return route
-
-
-def search_web_context(question):
-    """
-    Web検索風の補助関数。
-    実運用では外部検索APIに差し替えやすいように独立させている。
-
-    Args:
-        question: ユーザーの質問文
-
-    Returns:
-        str: Web検索結果の要約テキスト
-    """
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-
-    # 学習用として、外部情報の「調査メモ」を先に作る
-    # 実運用ではここを検索API呼び出しに置き換えやすい
-    prompt = ChatPromptTemplate.from_template(
-        """
-あなたはWeb検索結果要約アシスタントです。
-ユーザーの質問に答えるために必要な一般的な外部情報を、簡潔な箇条書きの調査メモとして作成してください。
-
-重要ルール:
-- これは学習用の擬似Web検索コンテキストです
-- 断定しすぎず、必要に応じて「最新性は別途確認が必要」と添えてください
-- 回答文ではなく、後段の回答生成で使うための参考メモとして出力してください
-- 3〜5項目程度に整理してください
-
-質問:
-{question}
-"""
-    )
-
-    chain = prompt | llm | StrOutputParser()
-    return chain.invoke({"question": question})
-
-
-def general_answer_node_response(question, prompt_type, chat_history):
-    """
-    検索なしで通常応答を返すための補助関数
-
-    Args:
-        question: ユーザーの質問文
-        prompt_type: 回答スタイル
-        chat_history: 会話履歴
-
-    Returns:
-        str: 回答文
-    """
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-    history_text = format_chat_history(chat_history, max_turns=3)
-
-    # general ルートでは検索を使わず、そのまま回答スタイルに沿って返す
-    prompt = ChatPromptTemplate.from_template(
-        """
-あなたは親切なAIアシスタントです。
-次の回答スタイルに従って、日本語でわかりやすく答えてください。
-
-回答スタイル: {prompt_type}
-会話履歴:
-{chat_history}
-
-質問:
-{question}
-"""
-    )
-
-    chain = prompt | llm | StrOutputParser()
-    return chain.invoke(
-        {
-            "prompt_type": prompt_type,
-            "chat_history": history_text,
-            "question": question,
-        }
-    )
-
-
-# LLMによる処理フロー分岐用の状態。
-# route に分類結果を持たせ、条件分岐で各ルートへ流す。
-class WorkflowRoutingState(TypedDict):
-    question: str
-    k: int
-    prompt_type: str
-    chat_history: list
-    route: str
-    context_text: str
-    retrieved_results: list
-    answer: str
-    search_query: str
-    persist_dir: str
-    web_context: str
-
-
-# ============================================
 # Tool Calling用の外部ツール定義
 # ============================================
 # Function Callingを学べるように、LLM が必要に応じて呼び出せる
@@ -678,155 +511,6 @@ def generate_node(state: RAGState):
     )
 
     return {"answer": response.content}
-
-
-# ============================================
-# LLMによる処理フロー分岐用ノード
-# ============================================
-# 最初に質問を分類し、その結果に応じて
-# document / web / general の処理フローへ分岐する。
-
-
-def classify_workflow_route_node(state: WorkflowRoutingState):
-    """質問内容から処理フローを判定するノード"""
-    route = classify_workflow_route_with_llm(state["question"], state["chat_history"])
-    return {"route": route}
-
-
-# document フローでは、既存RAGと同様に質問補完を行う。
-# これにより、文書検索が必要な follow-up 質問にも対応しやすくなる。
-def workflow_document_rewrite_query_node(state: WorkflowRoutingState):
-    """document フロー向けの検索質問補完ノード"""
-    if not state["chat_history"]:
-        return {"search_query": state["question"]}
-
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-    history_text = format_chat_history(state["chat_history"], max_turns=3)
-
-    # 会話の流れを踏まえて、検索しやすい具体的な質問文へ補完する
-    prompt = ChatPromptTemplate.from_template(
-        """
-あなたは検索用クエリ補完アシスタントです。
-会話履歴を参考にして、現在の質問が曖昧なら意味が通る具体的な質問文へ補完してください。
-明確な質問ならそのまま返してください。
-
-会話履歴:
-{chat_history}
-
-現在の質問:
-{question}
-"""
-    )
-
-    chain = prompt | llm | StrOutputParser()
-    search_query = chain.invoke(
-        {"chat_history": history_text, "question": state["question"]}
-    )
-    return {"search_query": search_query.strip()}
-
-
-def workflow_document_retrieve_node(state: WorkflowRoutingState):
-    """document フロー向けの文書検索ノード"""
-    vectorstore = Chroma(
-        persist_directory=state["persist_dir"],
-        embedding_function=OpenAIEmbeddings(model="text-embedding-3-small"),
-    )
-
-    retrieved_results = vectorstore.similarity_search_with_score(
-        state["search_query"], k=state["k"]
-    )
-    retrieved_docs = [doc for doc, _ in retrieved_results]
-    context_text = "\n\n".join([doc.page_content for doc in retrieved_docs])
-
-    return {"retrieved_results": retrieved_results, "context_text": context_text}
-
-
-def workflow_generate_document_answer_node(state: WorkflowRoutingState):
-    """document フロー向けの回答生成ノード"""
-    history_text = format_chat_history(state["chat_history"], max_turns=3)
-    prompt = get_prompt_template(state["prompt_type"])
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-    chain = prompt | llm
-
-    response = chain.invoke(
-        {
-            "chat_history": history_text,
-            "context": state["context_text"],
-            "question": state["question"],
-        }
-    )
-    return {"answer": response.content}
-
-
-def workflow_web_search_node(state: WorkflowRoutingState):
-    """web フロー向けのWeb調査メモ作成ノード"""
-    web_context = search_web_context(state["question"])
-    return {
-        "web_context": web_context,
-        "context_text": web_context,
-        "retrieved_results": [],
-    }
-
-
-def workflow_generate_web_answer_node(state: WorkflowRoutingState):
-    """web フロー向けの回答生成ノード"""
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-    history_text = format_chat_history(state["chat_history"], max_turns=3)
-
-    # web フローでは、事前に作った調査メモを根拠として回答を作る
-    prompt = ChatPromptTemplate.from_template(
-        """
-あなたは親切なAIアシスタントです。
-次のWeb調査メモを参考にして、日本語でわかりやすく回答してください。
-必要に応じて、最新性は確認が必要である旨も短く添えてください。
-
-回答スタイル: {prompt_type}
-会話履歴:
-{chat_history}
-
-Web調査メモ:
-{context}
-
-質問:
-{question}
-"""
-    )
-
-    chain = prompt | llm | StrOutputParser()
-    answer = chain.invoke(
-        {
-            "prompt_type": state["prompt_type"],
-            "chat_history": history_text,
-            "context": state["context_text"],
-            "question": state["question"],
-        }
-    )
-    return {"answer": answer}
-
-
-def workflow_general_answer_node(state: WorkflowRoutingState):
-    """general フロー向けの通常応答ノード"""
-    answer = general_answer_node_response(
-        state["question"], state["prompt_type"], state["chat_history"]
-    )
-    return {
-        "answer": answer,
-        "retrieved_results": [],
-        "context_text": "",
-        "web_context": "",
-    }
-
-
-def decide_workflow_after_classification(state: WorkflowRoutingState):
-    """route の値に応じて次ノードを返す条件分岐関数"""
-    route = state.get("route", "document")
-
-    if route == "web":
-        return "workflow_web_search"
-    if route == "general":
-        return "workflow_general_answer"
-
-    return "workflow_document_rewrite_query"
 
 
 # ============================================
@@ -1019,67 +703,13 @@ def build_tool_calling_graph():
     return graph_builder.compile()
 
 
-# LLMによる処理フロー分岐学習用のLangGraph。
-# 最初に処理フローを判定し、その結果で後続ノードを切り替える。
-def build_workflow_routing_graph():
-    """
-    LLMによる処理フロー分岐学習用のLangGraphを作成する
-
-    Returns:
-        CompiledStateGraph: 実行可能なLLMによる処理フロー分岐用LangGraph
-    """
-    graph_builder = StateGraph(WorkflowRoutingState)
-
-    graph_builder.add_node("classify_workflow_route", classify_workflow_route_node)
-    graph_builder.add_node(
-        "workflow_document_rewrite_query", workflow_document_rewrite_query_node
-    )
-    graph_builder.add_node(
-        "workflow_document_retrieve", workflow_document_retrieve_node
-    )
-    graph_builder.add_node(
-        "workflow_generate_document_answer", workflow_generate_document_answer_node
-    )
-    graph_builder.add_node("workflow_web_search", workflow_web_search_node)
-    graph_builder.add_node(
-        "workflow_generate_web_answer", workflow_generate_web_answer_node
-    )
-    graph_builder.add_node("workflow_general_answer", workflow_general_answer_node)
-
-    graph_builder.add_edge(START, "classify_workflow_route")
-
-    # classify_workflow_route の結果に応じて、次に進むノードを切り替える
-    graph_builder.add_conditional_edges(
-        "classify_workflow_route",
-        decide_workflow_after_classification,
-        {
-            "workflow_document_rewrite_query": "workflow_document_rewrite_query",
-            "workflow_web_search": "workflow_web_search",
-            "workflow_general_answer": "workflow_general_answer",
-        },
-    )
-
-    graph_builder.add_edge(
-        "workflow_document_rewrite_query", "workflow_document_retrieve"
-    )
-    graph_builder.add_edge(
-        "workflow_document_retrieve", "workflow_generate_document_answer"
-    )
-    graph_builder.add_edge("workflow_generate_document_answer", END)
-
-    graph_builder.add_edge("workflow_web_search", "workflow_generate_web_answer")
-    graph_builder.add_edge("workflow_generate_web_answer", END)
-
-    graph_builder.add_edge("workflow_general_answer", END)
-
-    return graph_builder.compile()
-
-
 # ============================================
 # 補助関数：RAG回答生成（Retrieve + Generate）
 # ============================================
 # RAGの本番処理「検索→回答生成」です。
 # 「Retrieve→Generate」の流れを実装。
+
+
 def answer_question(question, k, prompt_type, chat_history=None):
     """
     LangGraphを使ってRAGで質問に回答
@@ -1151,51 +781,6 @@ def answer_question_with_tool_calling(question, prompt_type, chat_history=None):
     )
 
 
-# LLMによる処理フロー分岐経由の回答生成。
-# 回答に加えて、どの route が選ばれたかも返してUIで可視化する。
-def answer_question_with_workflow_routing(question, k, prompt_type, chat_history=None):
-    """
-    LLMによる処理フロー分岐 RAGで質問に回答する
-
-    Args:
-        question: ユーザーの質問文
-        k: 文書検索で取得するチャンク数
-        prompt_type: 使用するプロンプト種別
-        chat_history: 会話履歴
-
-    Returns:
-        tuple: (回答文, route, retrieved_results, web_context)
-    """
-    # 初回実行時だけ処理フロー分岐用LangGraphを構築して保持する
-    if st.session_state.workflow_routing_graph is None:
-        st.session_state.workflow_routing_graph = build_workflow_routing_graph()
-
-    initial_state = {
-        "question": question,
-        "k": k,
-        "prompt_type": prompt_type,
-        "chat_history": chat_history or [],
-        "route": "",
-        "context_text": "",
-        "retrieved_results": [],
-        "answer": "",
-        "search_query": question,
-        "persist_dir": (
-            str(st.session_state.persist_dir) if st.session_state.persist_dir else ""
-        ),
-        "web_context": "",
-    }
-
-    result = st.session_state.workflow_routing_graph.invoke(initial_state)
-
-    return (
-        result["answer"],
-        result.get("route", ""),
-        result.get("retrieved_results", []),
-        result.get("web_context", ""),
-    )
-
-
 # ============================================
 # 補助関数：共通UI処理
 # ============================================
@@ -1209,10 +794,7 @@ def reset_chat_history():
     st.session_state.chat_history = []
     st.session_state.rag_graph = None
     st.session_state.tool_calling_graph = None
-    st.session_state.workflow_routing_graph = None
     st.session_state.last_tool_trace = []
-    st.session_state.last_workflow_route = ""
-    st.session_state.last_web_context = ""
 
 
 def get_history_for_prompt():
@@ -1313,37 +895,6 @@ def render_tool_trace_view():
                     "result_preview": trace["result_preview"],
                 }
             )
-
-
-# Query Routingの学習用に、どの経路が選ばれたかを表示する。
-# 文書検索・Web検索・通常応答のどれに分岐したかを可視化すると、
-# ルーティング設計の意図を理解しやすい。
-def render_workflow_routing_view():
-    """LLMによる処理フロー分岐の選択結果を表示する"""
-    if not st.session_state.last_workflow_route:
-        return
-
-    route_labels = {
-        "document": "文書検索フロー",
-        "web": "Web向けフロー",
-        "general": "通常応答フロー",
-    }
-
-    st.subheader("🧭 LLMによる処理フロー分岐結果")
-
-    selected_route_label = route_labels.get(
-        st.session_state.last_workflow_route,
-        st.session_state.last_workflow_route,
-    )
-
-    st.info(f"選択された処理フロー: **{selected_route_label}**")
-
-    if (
-        st.session_state.last_workflow_route == "web"
-        and st.session_state.last_web_context
-    ):
-        with st.expander("Web調査メモ"):
-            st.text(st.session_state.last_web_context)
 
 
 def render_splitter_comparison(uploaded_file, chunk_size, chunk_overlap):
@@ -1473,7 +1024,6 @@ def handle_index_creation(uploaded_file, chunk_size, chunk_overlap):
             # 2. 古い状態を解除
             st.session_state.rag_graph = None
             st.session_state.tool_calling_graph = None
-            st.session_state.workflow_routing_graph = None
             st.session_state.persist_dir = None
 
             # 3. 分割＆ベクトルDB作成
@@ -1491,8 +1041,6 @@ def handle_index_creation(uploaded_file, chunk_size, chunk_overlap):
                     "last_retrieved_results": [],
                     "persist_dir": persist_dir,
                     "last_tool_trace": [],
-                    "last_workflow_route": "",
-                    "last_web_context": "",
                 }
             )
 
@@ -1507,7 +1055,7 @@ def handle_index_creation(uploaded_file, chunk_size, chunk_overlap):
         st.caption("ファイル形式やAPIキーを確認してください")
 
 
-# 回答生成では、通常RAGと Function Calling RAG 等を切り替えられるようにする。
+# 回答生成では、通常RAGと Function Calling RAG を切り替えられるようにする。
 # これにより「検索を固定フローで行う場合」と「LLMがツール判断する場合」の
 # 差を同じUIで比較学習できる。
 def handle_answer_generation(question):
@@ -1543,22 +1091,6 @@ def handle_answer_generation(question):
                     )
                 )
                 st.session_state.last_tool_trace = tool_trace
-                st.session_state.last_workflow_route = ""
-                st.session_state.last_web_context = ""
-
-            elif st.session_state.execution_mode == "LLMルーティング RAG":
-                answer, route, retrieved_results, web_context = (
-                    answer_question_with_workflow_routing(
-                        question,
-                        st.session_state.retrieval_k,
-                        st.session_state.prompt_type,
-                        history_for_prompt,
-                    )
-                )
-                st.session_state.last_tool_trace = []
-                st.session_state.last_workflow_route = route
-                st.session_state.last_web_context = web_context
-
             else:
                 answer, retrieved_results = answer_question(
                     question,
@@ -1567,13 +1099,10 @@ def handle_answer_generation(question):
                     history_for_prompt,
                 )
                 st.session_state.last_tool_trace = []
-                st.session_state.last_workflow_route = ""
-                st.session_state.last_web_context = ""
 
             update_answer_state(answer, retrieved_results)
             append_chat_history(question, answer)
             st.success("✅ 回答完了！")
-
     except Exception as e:
         st.error(f"❌ 回答生成エラー: {str(e)}")
 
@@ -1658,10 +1187,7 @@ with right_col:
         "⚙️ 実行モード",
         MODE_TYPES,
         index=MODE_TYPES.index(st.session_state.execution_mode),
-        help=(
-            "通常RAGは固定フロー、Function Calling RAGはLLMが必要に応じてツールを選び、"
-            "LLMルーティング RAGは質問内容ごとに最適な処理フローへ分岐します。"
-        ),
+        help="通常RAGは固定フロー、Function Calling RAGはLLMが必要に応じてツールを選びます。",
     )
 
     st.session_state.prompt_type = prompt_type
@@ -1704,7 +1230,6 @@ with right_col:
         st.markdown(f"**{st.session_state.last_answer}**")
 
     render_tool_trace_view()
-    render_workflow_routing_view()
 
     # 現在の会話履歴を表示
     render_chat_history_view()

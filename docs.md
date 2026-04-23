@@ -27,11 +27,30 @@ Function Calling RAG
  search_documents_tool / summarize_history_tool   │
                      ↓                            │
                             finalize ←───────────┘
+
+LLM routing RAG
+                                  ↓
+                           質問入力(question)
+                                  ↓
+                classify_workflow_route で分類
+                 ┌──────────────┼──────────────┐
+                 ↓              ↓              ↓
+            document          web          general
+                 ↓              ↓              ↓
+ workflow_document_     workflow_web_   workflow_general_
+ rewrite_query          search          answer
+                 ↓              ↓
+ workflow_document_   workflow_generate_
+ retrieve             web_answer
+                 ↓
+ workflow_generate_
+ document_answer
 ```
 
 このアプリでは、会話履歴機能を `st.session_state` による単純な履歴保持だけでなく、**LangGraph の状態遷移** を使って実装しています。
-特に、曖昧な follow-up 質問をそのまま検索せず、`rewrite_query_node()` で **検索向けの具体的な質問文へ補完** してから Retrieve するのが重要な変更点です。
-加えて、Function Calling RAG では、LLM が必要に応じてツールを選び、ツール結果を使って最終回答を作る流れも学べます。
+特に通常RAGでは、曖昧な follow-up 質問をそのまま検索せず、`rewrite_query_node()` で **検索向けの具体的な質問文へ補完** してから Retrieve します。
+加えて、Function Calling RAG では、LLM が必要に応じてツールを選択し、`search_documents_tool()` や `summarize_history_tool()` の結果を使って最終回答を作る流れを学べます。
+さらに、LLMルーティング RAG では、`classify_workflow_route_with_llm()` によって質問を `document / web / general` に分類し、質問内容に応じて **文書検索・Web向けフロー・通常応答フロー** を切り替える構成も学べます。
 
 ### 2. 補助関数・ノード一覧
 | 関数名 | 役割 | 主なコンポーネント | フェーズ |
@@ -293,17 +312,186 @@ agent
                        END
 ```
 
-### 8. 実行フロー
+### 8. LLM routing RAG の構成
+
+#### LLM routing RAG の全体フロー
+LLM routing RAG では、最初に LLM が質問内容を見て、どの処理フローに進むべきかを判定します。
+この実装では、質問を `document` / `web` / `general` の3種類に分類し、その結果に応じて後続のノードを切り替えます。
+
+```text
+question
+   ↓
+classify_workflow_route_with_llm()
+   ↓
+document / web / general
+   ├─ document → workflow_document_rewrite_query_node()
+   │              → workflow_document_retrieve_node()
+   │              → workflow_generate_document_answer_node()
+   │              → answer
+   │
+   ├─ web      → workflow_web_search_node()
+   │              → workflow_generate_web_answer_node()
+   │              → answer
+   │
+   └─ general  → workflow_general_answer_node()
+                  → answer
+```
+
+- `document` は、アップロード済み文書の内容を検索すべき質問です。
+- `web` は、外部情報や最新情報を使って答えるべき質問です。
+- `general` は、検索を使わず通常の LLM 応答で十分な質問です。
+
+この構成により、すべての質問を同じRAGフローで処理するのではなく、質問の種類ごとに最適な処理へ分岐できます。
+
+#### `WorkflowRoutingState` - LLMルーティング用の状態定義
+```python
+class WorkflowRoutingState(TypedDict):
+    question: str
+    k: int
+    prompt_type: str
+    chat_history: list
+    route: str
+    context_text: str
+    retrieved_results: list
+    answer: str
+    search_query: str
+    persist_dir: str
+    web_context: str
+```
+
+- `route` に分類結果を保持し、1つの state でルーティングから回答生成まで扱います。
+- `web_context` を持つことで、web フローで作成した調査メモを UI に表示できます。
+- `persist_dir` を state に含めることで、document フローでは既存の Chroma インデックスをそのまま利用できます。
+
+#### `classify_workflow_route_with_llm()` - ルート分類
+```python
+def classify_workflow_route_with_llm(question, chat_history):
+```
+
+- 質問と会話履歴をもとに、`document / web / general` の3種類へ分類します。
+- 社内文書・アップロード資料・マニュアル参照は `document`、最新情報や外部サービス情報は `web`、言い換えや相談は `general` というルールです。
+- 想定外の出力が返った場合は `document` にフォールバックするため、後続の分岐が壊れにくくなっています。
+
+#### `classify_workflow_route_node()` - 分岐起点ノード
+```python
+def classify_workflow_route_node(state: WorkflowRoutingState):
+    route = classify_workflow_route_with_llm(state["question"], state["chat_history"])
+    return {"route": route}
+```
+
+- LangGraph の最初のノードとして動き、分類結果を `state["route"]` に格納します。
+- 後続の `add_conditional_edges()` は、この `route` を見て document / web / general の各経路へ分岐します。
+
+#### document フロー
+```text
+classify_workflow_route
+  → workflow_document_rewrite_query
+  → workflow_document_retrieve
+  → workflow_generate_document_answer
+```
+
+- 文書を参照すべき質問は、通常RAGと同様に質問補完 → ベクトル検索 → 回答生成の流れで処理します。
+- LLMルーティングは通常RAGを置き換えるというより、通常RAGへ入る前段に「どの処理に進むかの判定」を追加した構成です。
+
+#### web フロー
+```text
+classify_workflow_route
+  → workflow_web_search
+  → workflow_generate_web_answer
+```
+
+- `search_web_context()` で外部情報の調査メモを作り、その内容を文脈として回答を生成します。
+- 現在の実装は学習用の擬似Webコンテキスト生成であり、将来的に検索APIへ差し替えやすい構成です。
+
+#### general フロー
+```text
+classify_workflow_route
+  → workflow_general_answer
+```
+
+- 言い換え、相談、概念説明など、検索なしで十分な質問はこの経路で処理します。
+- 不要なベクトル検索を避けられるため、質問の種類に応じた挙動の違いを学びやすくなります。
+
+#### `build_workflow_routing_graph()` - 状態遷移
+```python
+graph_builder.add_node("classify_workflow_route", classify_workflow_route_node)
+graph_builder.add_node("workflow_document_rewrite_query", workflow_document_rewrite_query_node)
+graph_builder.add_node("workflow_document_retrieve", workflow_document_retrieve_node)
+graph_builder.add_node("workflow_generate_document_answer", workflow_generate_document_answer_node)
+graph_builder.add_node("workflow_web_search", workflow_web_search_node)
+graph_builder.add_node("workflow_generate_web_answer", workflow_generate_web_answer_node)
+graph_builder.add_node("workflow_general_answer", workflow_general_answer_node)
+```
+
+```python
+graph_builder.add_edge(START, "classify_workflow_route")
+graph_builder.add_conditional_edges(
+    "classify_workflow_route",
+    decide_workflow_after_classification,
+    {
+        "workflow_document_rewrite_query": "workflow_document_rewrite_query",
+        "workflow_web_search": "workflow_web_search",
+        "workflow_general_answer": "workflow_general_answer",
+    },
+)
+```
+
+- `classify_workflow_route` の後だけが条件分岐になっており、分類結果に応じて3経路へ遷移します。
+- document は `workflow_document_rewrite_query -> workflow_document_retrieve -> workflow_generate_document_answer -> END`、web は `workflow_web_search -> workflow_generate_web_answer -> END`、general は `workflow_general_answer -> END` です。
+
+
+#### Function Calling との違い
+
+| 項目 | Function Calling RAG | LLMルーティング RAG |
+|---|---|---|
+| LLMの主な役割 | 必要なツールを選んで呼び出す | 最適な処理フローを選ぶ |
+| 中心となる分岐 | `tool_calls` の有無で分岐 | `route` の値で分岐 |
+| 実行単位 | ツールを1つずつ呼び出して往復する | 最初に経路を1回決めて、その後は対応フローを進む |
+| 代表ノード | `tool_calling_llm_node()`、`tool_execution_node()` | `classify_workflow_route_node()`、`decide_workflow_after_classification()` |
+| 有効な場面 | 「まず文書検索するべきか」「履歴要約も必要か」など、質問ごとに必要な処理が細かく変わる場合 | 「この質問は文書検索か、Webか、通常回答か」を最初に大きく振り分けたい場合 |
+| 具体例 | 社内規定QAで、質問によっては文書検索だけで足りるが、曖昧な follow-up では履歴要約も併用したい場合 | チャットアプリで、社内文書への質問・一般相談・最新情報確認が混在している場合 |
+| 費用面の傾向 | ツール呼び出しの往復が増えるほど LLM 呼び出し回数も増えやすく、コストは高くなりやすい | 最初の分類コストは増えるが、不要な検索や不要なツール実行を避けやすく、全体コストを抑えやすい場合がある |
+| レイテンシ | ツール呼び出しを繰り返すと遅くなりやすい | 最初の分類後は単純なフローに流れるため、比較的安定しやすい |
+| 設計の向き不向き | 細かい判断を LLM に委ねたいが、挙動が複雑になりやすい | 大きな分岐を明示したいときに向くが、各ルートの設計は別途必要 |
+| UI表示 | Tool Callingログを確認できる | 選択された処理フローと Web調査メモを確認できる |
+
+- Function Calling は「どのツールを使うか」を LLM が判断する方式です。
+- LLMルーティングは「どのワークフローに進むか」を LLM が判断する方式です。
+- つまり、Function Calling はツール選択中心、LLMルーティングは処理経路選択中心という違いがあります。
+
+### 9. 実行フロー
+
+#### 通常RAG
 1. 文書をアップロードして `build_vectorstore()` を実行する。
 2. ユーザーが質問を入力する。
-3. `answer_question()` が `initial_state` を作る。
-4. `build_rag_graph()` で作った LangGraph を実行する。
-5. `rewrite_query_node()` が `search_query` を作る。
-6. `retrieve_node()` が `search_query` で検索し、`context_text` を作る。
-7. `generate_node()` が会話履歴と検索結果を使って回答する。
+3. `answer_question()` が通常RAG用の `initial_state` を作る。
+4. `build_rag_graph()` で作成した LangGraph を実行する。
+5. `rewrite_query_node()` が会話履歴をもとに `search_query` を作る。
+6. `retrieve_node()` が `search_query` を使ってベクトル検索し、`context_text` を作る。
+7. `generate_node()` が会話履歴と検索結果を使って回答を生成する。
 8. 回答と検索根拠を UI に表示する。
 
-### 9. 学習価値
+#### Function Calling RAG
+1. 文書をアップロードしてベクトルDBを準備する。
+2. ユーザーが質問を入力する。
+3. `answer_question_with_tool_calling()` が Function Calling 用の state を作る。
+4. `build_tool_calling_graph()` の `agent` ノードで、LLM がツール利用の要否を判定する。
+5. 必要であれば `search_documents_tool()` や `summarize_history_tool()` を呼び出す。
+6. `tool_execution_node()` がツールを実行し、その結果を `ToolMessage` として state に追加する。
+7. LLM はツール結果を受けて、さらにツールを呼ぶか、そのまま最終回答に進むかを判断する。
+8. `tool_calling_finalize_node()` が最終回答を確定し、UI に Tool Calling ログとあわせて表示する。
+
+#### LLM routing RAG
+1. 文書をアップロードしてベクトルDBを準備する。
+2. ユーザーが質問を入力する。
+3. `answer_question_with_workflow_routing()` が LLM routing 用の state を作る。
+4. `build_workflow_routing_graph()` の `classify_workflow_route_node()` が、質問を `document / web / general` に分類する。
+5. `document` の場合は、質問補完 → 文書検索 → 回答生成の順に実行する。
+6. `web` の場合は、Web調査メモを生成し、その内容をもとに回答生成する。
+7. `general` の場合は、検索を行わず通常の LLM 応答を返す。
+8. UI には回答に加えて、選択されたルートや必要に応じて Web調査メモを表示する。
+
+### 10. 学習価値
 
 この実装で学べることは次の通りです。
 

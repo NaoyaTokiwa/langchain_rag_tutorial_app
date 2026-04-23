@@ -2,7 +2,7 @@
 
 LangChain、LangGraph、Streamlit を使って、RAG（Retrieval-Augmented Generation）の基本を学べる初心者向けチュートリアルアプリです。
 
-このアプリでは、文書のアップロード、チャンク分割、埋め込み、ベクトルDB保存、検索、回答生成までの流れを、UIで確認しながら体験できます。加えて、検索件数 `k`、プロンプトタイプ、分割方式、**LangGraph を用いた会話履歴つきQ&A**、**Function Calling（Tool Calling）を用いたRAG** を切り替えながら、RAGの設計ポイントを比較学習できます。
+このアプリでは、文書のアップロード、チャンク分割、埋め込み、ベクトルDB保存、検索、回答生成までの流れを、UIで確認しながら体験できます。加えて、検索件数 `k`、プロンプトタイプ、分割方式、**LangGraph を用いた会話履歴つきQ&A**、**Function Calling（Tool Calling）を用いたRAG**、**LLM Routing RAG** を切り替えながら、RAGの設計ポイントを比較学習できます。
 
 ⚠️本来であれば`app.py`を`config.py`や`ui.py`など役割ごとに分割する構成にする方が望ましいが、生成AI活用した修正が行いやすいように1つのファイルにて管理
 
@@ -16,9 +16,10 @@ LangChain、LangGraph、Streamlit を使って、RAG（Retrieval-Augmented Gener
 - 「初心者向け」「要約重視」「箇条書き重視」のプロンプト切り替え
 - 会話履歴あり / なし を切り替えて、単発RAGと対話型RAGを比較
 - LangGraph の `rewrite_query -> retrieve -> generate` フローを使った会話履歴つきQ&A
-- `通常RAG` と `Function Calling RAG` の実行モード比較
+- `通常RAG` / `Function Calling RAG` / `LLM Routing RAG` の実行モード比較
 - `search_documents_tool()` / `summarize_history_tool()` を使った Tool Calling の学習
 - Tool Callingログを見ながら、LLM がどのツールを呼んだか確認
+- LLM Routing結果を見ながら、質問がどの経路に分類されたか確認
 - 検索根拠、会話履歴、最終回答を同じ画面で確認
 
 ## RAGの流れ
@@ -35,12 +36,19 @@ Function Calling RAG:
 質問入力 → agent(LLM) → 必要に応じてTool Calling → tool_execution → agent(LLM) → finalize
                                ↓
                search_documents_tool / summarize_history_tool
+
+LLM Routing RAG:
+質問入力 → route_question で分類
+          ├→ document: rewrite_query → retrieve → generate_document_answer
+          ├→ web: search_web_context → generate_web_answer
+          └→ general: general_answer
 ```
 
 - LLM単体では、学習済み知識だけを頼りに回答します。
 - RAGでは、アップロードした文書を検索して、その内容を参考に回答します。
 - このアプリでは、さらに LangGraph を使って会話履歴を検索前段にも反映し、曖昧な follow-up 質問を補完してから検索します。
 - また、Function Calling RAG では、LLM が必要に応じて `search_documents_tool()` や `summarize_history_tool()` を選び、ツール結果を使って最終回答を作る流れも学べます。
+- LLM Routing RAG では、質問内容を `document / web / general` に分類し、文書検索・Web向け回答・通常回答のどれが適切かを判定してから処理を進めます。
 
 ## 学習ポイント
 
@@ -77,6 +85,27 @@ Function Calling RAG:
 - `summarize_history_tool()` は直近の会話履歴を要約し、follow-up 質問の補助に使えます。
 - LangGraph では `agent -> tool_execution -> agent -> finalize` という流れで、LLM とツール実行を分離して学べます。
 - UI の Tool Callingログから、どのツールがどんな引数で呼ばれたか確認できます。
+
+### 6. LLM Routing の学習
+
+- 実行モードを `LLM Routing RAG` に切り替えると、`classify_route_with_llm()` が質問を `document / web / general` の3経路に分類します。
+- `document` ルートでは、`routing_rewrite_query_node()` → `routing_retrieve_node()` → `routing_generate_document_answer_node()` の流れで、通常RAGに近い文書検索ベースの回答を行います。
+- `web` ルートでは、`search_web_context()` が外部情報用の調査メモを生成し、`routing_generate_web_answer_node()` がその内容をもとに回答します。
+- `general` ルートでは、`general_answer_node_response()` を使って、検索を行わず通常のLLM回答を返します。
+- ルーティングには会話履歴も使うため、follow-up 質問でも前後関係を踏まえて route を選びやすくしています。
+- UI では `LLM Routing結果` が表示され、`web` ルート時には `Web調査メモ` も確認できます。
+
+### 7. LLM Routing の設計方針
+
+このアプリの LLM Routing は、**質問の意味や意図に応じて処理経路を切り替える Semantic Routing に近い設計**です。
+
+- `classify_route_with_llm()` で、質問文と会話履歴をもとに `document / web / general` の3経路へ分類します。
+- これは単純なキーワード一致ではなく、「アップロード文書を参照すべきか」「外部情報が必要か」「通常応答で十分か」を意味ベースで判定するため、**LLMベースの Semantic Routing** と表現できます。
+- 一方で、分類後は `decide_route_after_classification()` によって、LangGraph の次ノードを条件分岐で切り替えています。
+- そのため、実装全体としては **Semantic Routing で経路を決め、Logical Routing でフローを実行している構成** と捉えると分かりやすいです。
+- 具体的には、`document` は文書検索ルート、`web` は外部情報向けルート、`general` は検索なしの通常応答ルートとして動作します。
+
+このように、質問の内容理解とワークフロー分岐を分離することで、RAGアプリにおけるルーティング設計の基本を学べるようにしています。
 
 ## アプリ画面
 
@@ -126,6 +155,33 @@ Function Calling RAG:
 
 - Function Calling RAG では、LLM が必要に応じて `search_documents_tool()` や `summarize_history_tool()` を呼び出します。
 - 前の質問内容を踏まえつつ、ツール結果を根拠に次の回答を作る流れを確認できます。
+
+
+#### LLM Routingの動作確認例
+
+以下は、LLM Routing RAG において質問内容に応じて `document` / `web` / `general` の各ルートへ分岐した際の出力例です。
+
+- `document` ルート: 架空企業の社内ハンドブック文書を検索して回答する例
+
+<p align="center">
+  <img src="images/文書検索ルート.png" alt="documentルート動作確認例" width="900">
+</p>
+
+- `web` ルート: Web調査メモをもとに回答する例
+
+<p align="center">
+  <img src="images/web検索ルート.png" alt="webルート動作確認例" width="900">
+</p>
+
+- `general` ルート: 文書検索やWeb調査を使わず通常回答する例
+
+<p align="center">
+  <img src="images/通常応答ルート.png.png" alt="generalルート動作確認例" width="900">
+</p>
+
+- `document` ルートでは、文書検索ベースで根拠を参照しながら回答します。
+- `web` ルートでは、外部情報向けの調査メモを生成してから回答します。
+- `general` ルートでは、検索を行わず通常のLLM応答を返します。
 
 ### 他の回答例
 
@@ -235,8 +291,9 @@ streamlit run app.py
 5. 右カラムで検索件数 `k`、プロンプトタイプ、実行モード、会話履歴ON/OFFを設定します。
 6. 実行モードを `通常RAG` にすると、LangGraph の `rewrite_query -> retrieve -> generate` フローで回答します。
 7. 実行モードを `Function Calling RAG` にすると、LLM が `search_documents_tool()` や `summarize_history_tool()` を必要に応じて呼び出します。
-8. 質問を入力して「🤖 回答生成」を押します。
-9. 最終回答、会話履歴、検索根拠、類似度スコア、必要に応じて Tool Callingログを確認します。
+8. 実行モードを `LLM Routing RAG` にすると、質問内容に応じて `document / web / general` の経路へ自動分岐します。
+9. 質問を入力して「🤖 回答生成」を押します。
+10. 最終回答、会話履歴、検索根拠、類似度スコア、必要に応じて Tool Callingログや LLM Routing結果を確認します。
 
 ## 注意点
 
@@ -260,9 +317,30 @@ streamlit run app.py
 - Function Calling(Tool Callingの一種)  --> 実装済み
     - ~~Tool Calling：LLM が必要に応じて外部ツールを選んで実行し、その結果を使って最終回答を作る仕組み~~
     - ~~LLMが必要に応じてPython関数や外部処理を呼び出せるようにし、文書検索・履歴要約・条件分岐をより柔軟に制御できる構成を学べるようにする。~~
-- Query Routing
-    - 質問内容に応じて、文書検索・Web検索・通常応答など最適な処理経路へ分岐し、精度と効率の両立を学べるようにする。
+- LLM Routing  -> 実装済み
+    - ~~質問内容に応じて、文書検索・Web検索・通常応答など最適な処理経路へ分岐し、精度と効率の両立を学べるようにする。~~
 - History Compression
     - 長い会話履歴を要約して保持し、トークン消費を抑えながら対話の一貫性を保つ手法を学べるようにする。
 - ベクトルストアの再利用機能
     - 同じ文章で動作確認を繰り返しているので、OpenAI API利用料金節約のため永続化できないか検討(RecordManagerが適用できそう？)
+- 評価機能
+    - 通常RAG vs LLM Routing(documentルート) の比較評価を入れる(Ragasを適用か？)
+
+
+## LLMルーティング
+
+このアプリでは `LLM RAG` モードとして、LLM が質問内容を判定し、回答までのワークフローを切り替える LLMルーティングを実装しています。
+分類先は `document`、`web`、`general` の 3 つで、質問の種類に応じてドキュメント検索・Web用コンテキスト生成・LLM直接回答を使い分けます。
+
+### 動作概要
+
+- `classify_workflow_route_with_llm()` が質問とチャット履歴からルートを判定
+- `build_workflow_routing_graph()` が LangGraph の分岐フローを構築
+- `answer_question_with_workflow_routing()` が実行エントリとなり、回答・ルート・検索結果・Webコンテキストを返却
+- UI では `LLM RAG` を選ぶと、最終的に選択されたルートも確認可能
+
+### 3つのルート
+
+- `document`: クエリ書き換え後に Chroma から類似検索し、取得したコンテキストで回答
+- `web`: `search_web_context()` で Web 向けコンテキストを生成し、その内容をもとに回答
+- `general`: 検索を行わず、LLM がそのまま回答
