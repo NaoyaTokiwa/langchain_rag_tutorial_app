@@ -95,18 +95,6 @@ LLM Routing RAG:
 - ルーティングには会話履歴も使うため、follow-up 質問でも前後関係を踏まえて route を選びやすくしています。
 - UI では `LLM Routing結果` が表示され、`web` ルート時には `Web調査メモ` も確認できます。
 
-### 7. LLM Routing の設計方針
-
-このアプリの LLM Routing は、**質問の意味や意図に応じて処理経路を切り替える Semantic Routing に近い設計**です。
-
-- `classify_route_with_llm()` で、質問文と会話履歴をもとに `document / web / general` の3経路へ分類します。
-- これは単純なキーワード一致ではなく、「アップロード文書を参照すべきか」「外部情報が必要か」「通常応答で十分か」を意味ベースで判定するため、**LLMベースの Semantic Routing** と表現できます。
-- 一方で、分類後は `decide_route_after_classification()` によって、LangGraph の次ノードを条件分岐で切り替えています。
-- そのため、実装全体としては **Semantic Routing で経路を決め、Logical Routing でフローを実行している構成** と捉えると分かりやすいです。
-- 具体的には、`document` は文書検索ルート、`web` は外部情報向けルート、`general` は検索なしの通常応答ルートとして動作します。
-
-このように、質問の内容理解とワークフロー分岐を分離することで、RAGアプリにおけるルーティング設計の基本を学べるようにしています。
-
 ## アプリ画面
 
 ### メイン画面
@@ -176,7 +164,7 @@ LLM Routing RAG:
 - `general` ルート: 文書検索やWeb調査を使わず通常回答する例
 
 <p align="center">
-  <img src="images/通常応答ルート.png.png" alt="generalルート動作確認例" width="900">
+  <img src="images/通常応答ルート.png" alt="generalルート動作確認例" width="900">
 </p>
 
 - `document` ルートでは、文書検索ベースで根拠を参照しながら回答します。
@@ -325,22 +313,3 @@ streamlit run app.py
     - 同じ文章で動作確認を繰り返しているので、OpenAI API利用料金節約のため永続化できないか検討(RecordManagerが適用できそう？)
 - 評価機能
     - 通常RAG vs LLM Routing(documentルート) の比較評価を入れる(Ragasを適用か？)
-
-
-## LLMルーティング
-
-このアプリでは `LLM RAG` モードとして、LLM が質問内容を判定し、回答までのワークフローを切り替える LLMルーティングを実装しています。
-分類先は `document`、`web`、`general` の 3 つで、質問の種類に応じてドキュメント検索・Web用コンテキスト生成・LLM直接回答を使い分けます。
-
-### 動作概要
-
-- `classify_workflow_route_with_llm()` が質問とチャット履歴からルートを判定
-- `build_workflow_routing_graph()` が LangGraph の分岐フローを構築
-- `answer_question_with_workflow_routing()` が実行エントリとなり、回答・ルート・検索結果・Webコンテキストを返却
-- UI では `LLM RAG` を選ぶと、最終的に選択されたルートも確認可能
-
-### 3つのルート
-
-- `document`: クエリ書き換え後に Chroma から類似検索し、取得したコンテキストで回答
-- `web`: `search_web_context()` で Web 向けコンテキストを生成し、その内容をもとに回答
-- `general`: 検索を行わず、LLM がそのまま回答
