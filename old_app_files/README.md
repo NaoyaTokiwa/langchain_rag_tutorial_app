@@ -10,4 +10,4 @@ app_v1.7.py :LangGraphを用いた会話履歴機能に修正 \
 app_v1.8.py :Function Calling機能追加 \
 app_v1.9.py :LLM Routing機能追加 \
 
-app.py      :History Compression
+app.py      :LLM Routing機能追加
