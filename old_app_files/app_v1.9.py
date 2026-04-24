@@ -13,8 +13,7 @@ from typing import TypedDict  # 型付き辞書
 
 import streamlit as st  # WebアプリUI
 from dotenv import load_dotenv  # 環境変数読み込み
-from langchain.memory import ConversationSummaryMemory  # 会話履歴の要約メモリ
-from langchain.prompts import ChatPromptTemplate, PromptTemplate  # プロンプト作成
+from langchain.prompts import ChatPromptTemplate  # プロンプト作成
 from langchain_community.vectorstores import Chroma  # ベクトルDB
 
 # LangChain系（RAGの部品箱）
@@ -65,10 +64,7 @@ SESSION_DEFAULTS = {
     "compare_chunk_overlap": 200,
     "show_splitter_comparison": False,
     "chat_history": [],
-    "conversation_memory": None,  # ConversationSummaryMemory本体
     "use_chat_history": True,
-    "memory_summary_enabled": True,  # 要約メモリを使うかどうか
-    "memory_max_turns_before_summary": 3,  # 要約に加えて生で保持する直近ターン数
     "rag_graph": None,
     "persist_dir": None,
     "tool_calling_graph": None,  # Function Calling 用のLangGraph保持用
@@ -338,112 +334,6 @@ def format_chat_history(chat_history, max_turns=3):
     return "\n\n".join(history_texts)
 
 
-SUMMARY_PROMPT_JA = PromptTemplate(
-    input_variables=["summary", "new_lines"],
-    template="""
-あなたは会話履歴を日本語で要約するアシスタントです。
-これまでの要約と新しい会話履歴をもとに、要点だけを自然な日本語で更新要約してください。
-必ず日本語で出力してください。
-箇条書きではなく、読みやすい短い文章でまとめてください。
-
-これまでの要約:
-{summary}
-
-新しい会話履歴:
-{new_lines}
-
-更新後の要約:
-""".strip(),
-)
-
-
-# ============================================
-# 補助関数：ConversationSummaryMemory関連
-# ============================================
-# 長い会話履歴をそのまま全部渡すと、トークン数が増えやすくなります。
-# そこで LangChain の ConversationSummaryMemory を使い、
-# 「これまでの会話要約」+「直近の数ターン」を LLM に渡す構成にします。
-def get_or_create_conversation_memory():
-    """ConversationSummaryMemory を初期化して返す"""
-    if st.session_state.conversation_memory is None:
-        summary_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-        st.session_state.conversation_memory = ConversationSummaryMemory(
-            llm=summary_llm,
-            memory_key="chat_history",
-            input_key="input",
-            output_key="output",
-            return_messages=False,
-            prompt=SUMMARY_PROMPT_JA,  # ← 日本語要約プロンプトを指定
-        )
-    return st.session_state.conversation_memory
-
-
-def rebuild_conversation_memory_from_history(chat_history):
-    """
-    現在の chat_history から ConversationSummaryMemory を再構築する
-
-    Notes:
-        Streamlit は再実行モデルのため、Session State と要約メモリが
-        ずれないように、必要時に履歴から再構築できるようにしておくと安全です。
-
-    Args:
-        chat_history: 質問と回答の履歴リスト
-
-    Returns:
-        ConversationSummaryMemory: 再構築済みの要約メモリ
-    """
-    memory = get_or_create_conversation_memory()
-    memory.clear()
-
-    for turn in chat_history:
-        memory.save_context(
-            {"input": turn["question"]},
-            {"output": turn["answer"]},
-        )
-
-    return memory
-
-
-def format_chat_history_with_summary(chat_history, max_turns=3):
-    """
-    会話履歴を「要約 + 直近ターン」の形式で整形する
-
-    Args:
-        chat_history: 質問と回答の履歴リスト
-        max_turns: 要約とは別に、そのまま保持する直近ターン数
-
-    Returns:
-        str: 要約付きの会話履歴テキスト
-    """
-    if not chat_history:
-        return "会話履歴なし"
-
-    # 要約機能をオフにした場合は、従来どおり直近履歴だけを返します。
-    if not st.session_state.memory_summary_enabled:
-        return format_chat_history(chat_history, max_turns=max_turns)
-
-    memory = rebuild_conversation_memory_from_history(chat_history)
-    memory_variables = memory.load_memory_variables({})
-    summary_text = memory_variables.get("chat_history", "")
-
-    recent_history = chat_history[-max_turns:]
-    recent_history_texts = []
-    for i, turn in enumerate(recent_history, start=1):
-        recent_history_texts.append(
-            f"[直近の会話 {i}]\n質問: {turn['question']}\n回答: {turn['answer']}"
-        )
-
-    # まだ会話が短い場合は、無理に要約を前面に出さず直近履歴のみ返します。
-    if len(chat_history) <= max_turns:
-        return "\n\n".join(recent_history_texts)
-
-    return (
-        "[これまでの会話要約]\n"
-        f"{summary_text if summary_text else '要約なし'}\n\n"
-        "[直近の会話]\n" + "\n\n".join(recent_history_texts)
-    )
-
-
 # ============================================
 # LLMによる処理フロー分岐用の補助関数
 # ============================================
@@ -469,9 +359,7 @@ def classify_workflow_route_with_llm(question, chat_history):
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
     # 曖昧な follow-up 質問も判定しやすいように履歴を渡す
-    history_text = format_chat_history_with_summary(
-        chat_history, max_turns=st.session_state.memory_max_turns_before_summary
-    )
+    history_text = format_chat_history(chat_history, max_turns=3)
 
     # 3つの候補から1語だけ返すよう明示して、後続の条件分岐を安定させる
     prompt = ChatPromptTemplate.from_template(
@@ -564,9 +452,7 @@ def general_answer_node_response(question, prompt_type, chat_history):
         str: 回答文
     """
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-    history_text = format_chat_history_with_summary(
-        chat_history, max_turns=st.session_state.memory_max_turns_before_summary
-    )
+    history_text = format_chat_history(chat_history, max_turns=3)
 
     # general ルートでは検索を使わず、そのまま回答スタイルに沿って返す
     prompt = ChatPromptTemplate.from_template(
@@ -663,9 +549,7 @@ def summarize_history_tool() -> str:
     chat_history = st.session_state.chat_history
     if not chat_history:
         return "会話履歴なし"
-    return format_chat_history_with_summary(
-        chat_history, max_turns=st.session_state.memory_max_turns_before_summary
-    )
+    return format_chat_history(chat_history, max_turns=3)
 
 
 TOOLS = [search_documents_tool, summarize_history_tool]
@@ -715,10 +599,7 @@ def rewrite_query_node(state: RAGState):
         return {"search_query": state["question"]}
 
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-    history_text = format_chat_history_with_summary(
-        state["chat_history"],
-        max_turns=st.session_state.memory_max_turns_before_summary,
-    )
+    history_text = format_chat_history(state["chat_history"], max_turns=3)
 
     prompt = ChatPromptTemplate.from_template(
         """
@@ -783,10 +664,7 @@ def generate_node(state: RAGState):
     Returns:
         dict: 更新する状態
     """
-    history_text = format_chat_history_with_summary(
-        state["chat_history"],
-        max_turns=st.session_state.memory_max_turns_before_summary,
-    )
+    history_text = format_chat_history(state["chat_history"], max_turns=3)
     prompt = get_prompt_template(state["prompt_type"])
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
     chain = prompt | llm
@@ -823,10 +701,7 @@ def workflow_document_rewrite_query_node(state: WorkflowRoutingState):
         return {"search_query": state["question"]}
 
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-    history_text = format_chat_history_with_summary(
-        state["chat_history"],
-        max_turns=st.session_state.memory_max_turns_before_summary,
-    )
+    history_text = format_chat_history(state["chat_history"], max_turns=3)
 
     # 会話の流れを踏まえて、検索しやすい具体的な質問文へ補完する
     prompt = ChatPromptTemplate.from_template(
@@ -868,10 +743,7 @@ def workflow_document_retrieve_node(state: WorkflowRoutingState):
 
 def workflow_generate_document_answer_node(state: WorkflowRoutingState):
     """document フロー向けの回答生成ノード"""
-    history_text = format_chat_history_with_summary(
-        state["chat_history"],
-        max_turns=st.session_state.memory_max_turns_before_summary,
-    )
+    history_text = format_chat_history(state["chat_history"], max_turns=3)
     prompt = get_prompt_template(state["prompt_type"])
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
     chain = prompt | llm
@@ -899,10 +771,7 @@ def workflow_web_search_node(state: WorkflowRoutingState):
 def workflow_generate_web_answer_node(state: WorkflowRoutingState):
     """web フロー向けの回答生成ノード"""
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-    history_text = format_chat_history_with_summary(
-        state["chat_history"],
-        max_turns=st.session_state.memory_max_turns_before_summary,
-    )
+    history_text = format_chat_history(state["chat_history"], max_turns=3)
 
     # web フローでは、事前に作った調査メモを根拠として回答を作る
     prompt = ChatPromptTemplate.from_template(
@@ -978,10 +847,7 @@ def tool_calling_llm_node(state: ToolCallingState):
         dict: 更新するmessagesを含む状態
     """
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0).bind_tools(TOOLS)
-    history_text = format_chat_history_with_summary(
-        state["chat_history"],
-        max_turns=st.session_state.memory_max_turns_before_summary,
-    )
+    history_text = format_chat_history(state["chat_history"], max_turns=3)
 
     system_prompt = SystemMessage(
         content=f"""
@@ -1341,11 +1207,6 @@ def reset_chat_history():
         None
     """
     st.session_state.chat_history = []
-
-    # 要約メモリも同時にクリアしないと、画面上の履歴と内部メモリがずれる可能性があります。
-    if st.session_state.conversation_memory is not None:
-        st.session_state.conversation_memory.clear()
-
     st.session_state.rag_graph = None
     st.session_state.tool_calling_graph = None
     st.session_state.workflow_routing_graph = None
@@ -1371,21 +1232,9 @@ def update_answer_state(answer, retrieved_results):
 
 
 def append_chat_history(question, answer):
-    """
-    今回の質問と回答を履歴へ保存する
-
-    Notes:
-        ConversationSummaryMemory を有効にしている場合は、
-        通常の chat_history だけでなく要約メモリもあわせて更新します。
-    """
+    """今回の質問と回答を履歴へ保存"""
     if st.session_state.use_chat_history:
         st.session_state.chat_history.append({"question": question, "answer": answer})
-
-        # 追加した会話を要約メモリへ逐次反映します。
-        # これにより次ターン以降、長い履歴でも summary を参照できます。
-        if st.session_state.memory_summary_enabled:
-            memory = get_or_create_conversation_memory()
-            memory.save_context({"input": question}, {"output": answer})
 
 
 def render_chunk_preview(chunks):
@@ -1417,16 +1266,6 @@ def render_chat_history_view():
         return
 
     st.subheader("🗂️ 会話履歴")
-
-    # 学習用に、ConversationSummaryMemory がどのように要約しているかを見える化します。
-    if st.session_state.memory_summary_enabled:
-        with st.expander("📝 ConversationSummaryMemory の要約結果", expanded=False):
-            st.text(
-                format_chat_history_with_summary(
-                    st.session_state.chat_history,
-                    max_turns=st.session_state.memory_max_turns_before_summary,
-                )
-            )
     for i, turn in enumerate(reversed(st.session_state.chat_history), start=1):
         history_index = len(st.session_state.chat_history) - i + 1
         with st.expander(f"会話履歴 #{history_index}"):
@@ -1837,25 +1676,6 @@ with right_col:
     )
 
     st.session_state.use_chat_history = use_chat_history
-
-    # 長い会話を summary に圧縮するかどうかを切り替えるUIです。
-    memory_summary_enabled = st.checkbox(
-        "📝 ConversationSummaryMemoryで長い履歴を要約する",
-        value=st.session_state.memory_summary_enabled,
-        help="オンにすると、過去会話を要約しつつ直近の数ターンはそのまま保持します。",
-    )
-    st.session_state.memory_summary_enabled = memory_summary_enabled
-
-    # 何ターン分を「生の履歴」として残すかを調整します。
-    memory_max_turns_before_summary = st.slider(
-        "🧾 要約とは別に保持する直近ターン数",
-        min_value=1,
-        max_value=10,
-        value=st.session_state.memory_max_turns_before_summary,
-        step=1,
-        help="要約だけでなく、そのまま参照させたい直近の会話ターン数です。",
-    )
-    st.session_state.memory_max_turns_before_summary = memory_max_turns_before_summary
 
     # 履歴を手動でリセット
     if st.button("🗑️ 会話履歴をクリア", use_container_width=True):

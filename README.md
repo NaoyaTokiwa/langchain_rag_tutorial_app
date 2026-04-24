@@ -4,7 +4,7 @@ LangChain、LangGraph、Streamlit を使って、RAG（Retrieval-Augmented Gener
 
 このアプリでは、文書のアップロード、チャンク分割、埋め込み、ベクトルDB保存、検索、回答生成までの流れを、UIで確認しながら体験できます。加えて、検索件数 `k`、プロンプトタイプ、分割方式、**LangGraph を用いた会話履歴つきQ&A**、**Function Calling（Tool Calling）を用いたRAG**、**LLM Routing RAG** を切り替えながら、RAGの設計ポイントを比較学習できます。
 
-⚠️本来であれば`app.py`を`config.py`や`ui.py`など役割ごとに分割する構成にする方が望ましいが、生成AI活用した修正が行いやすいように1つのファイルにて管理
+⚠️本来であれば`app.py`を`config.py`や`ui.py`など役割ごとに分割する構成にする方が望ましいが、生成AI活用した修正が行いやすいように1つのファイルにて管理。最終的にはリファクタリングを予定
 
 ## このアプリでできること
 
@@ -15,6 +15,7 @@ LangChain、LangGraph、Streamlit を使って、RAG（Retrieval-Augmented Gener
 - 類似度スコア（distance）を見ながら検索根拠を確認
 - 「初心者向け」「要約重視」「箇条書き重視」のプロンプト切り替え
 - 会話履歴あり / なし を切り替えて、単発RAGと対話型RAGを比較
+- `ConversationSummaryMemory` による会話履歴の要約保持を確認
 - LangGraph の `rewrite_query -> retrieve -> generate` フローを使った会話履歴つきQ&A
 - `通常RAG` / `Function Calling RAG` / `LLM Routing RAG` の実行モード比較
 - `search_documents_tool()` / `summarize_history_tool()` を使った Tool Calling の学習
@@ -47,6 +48,7 @@ LLM Routing RAG:
 - LLM単体では、学習済み知識だけを頼りに回答します。
 - RAGでは、アップロードした文書を検索して、その内容を参考に回答します。
 - このアプリでは、さらに LangGraph を使って会話履歴を検索前段にも反映し、曖昧な follow-up 質問を補完してから検索します。
+- また、長い会話履歴は `ConversationSummaryMemory` で日本語要約し、直近ターンと組み合わせてプロンプトへ渡すことで、トークン増加を抑えつつ対話の一貫性を保ちます。
 - また、Function Calling RAG では、LLM が必要に応じて `search_documents_tool()` や `summarize_history_tool()` を選び、ツール結果を使って最終回答を作る流れも学べます。
 - LLM Routing RAG では、質問内容を `document / web / general` に分類し、文書検索・Web向け回答・通常回答のどれが適切かを判定してから処理を進めます。
 
@@ -77,6 +79,15 @@ LLM Routing RAG:
 - 会話履歴ONでは、前の質問と回答を `st.session_state` に保持しつつ、LangGraph の `rewrite_query_node()` で検索用質問へ補完します。
 - その後 `retrieve_node()` で補完済みクエリ検索、`generate_node()` で回答生成を行います。
 - これにより、単発RAGと対話型RAGの違いだけでなく、**検索前に文脈補完する重要性** も学べます。
+
+### 4.5 ConversationSummaryMemory による履歴要約
+
+- 長い会話履歴をそのまま毎回 LLM に渡すと、トークン消費が増え、応答速度やコストに影響しやすくなります。
+- そこでこのアプリでは、`ConversationSummaryMemory` を使って過去会話を**日本語で要約**し、さらに直近の数ターンをそのまま残す構成を採用しています。
+- 実装上は `format_chat_history_with_summary()` が、`[これまでの会話要約]` と `[直近の会話]` をまとめてプロンプトへ渡します。
+- 要約には `SUMMARY_PROMPT_JA` を使っており、要約文が英語ではなく日本語で更新されるようにしています。
+- UI では `ConversationSummaryMemoryで長い履歴を要約する` のチェックボックスと、`要約とは別に保持する直近ターン数` のスライダーで挙動を切り替えられます。
+- さらに、`会話履歴` セクション内の `ConversationSummaryMemory の要約結果` から、内部でどのように履歴が圧縮されているかを確認できます。
 
 ### 5. Function Calling（Tool Calling）の学習
 
@@ -170,6 +181,24 @@ LLM Routing RAG:
 - `document` ルートでは、文書検索ベースで根拠を参照しながら回答します。
 - `web` ルートでは、外部情報向けの調査メモを生成してから回答します。
 - `general` ルートでは、検索を行わず通常のLLM応答を返します。
+
+### ConversationSummaryMemory による履歴要約例
+
+以下は、[架空企業の社内ハンドブック](data/sample_company_handbook.txt) を入力し、`ConversationSummaryMemoryで長い履歴を要約する` をオンにした状態で、次の4つの質問を順番に入力した際の例です。
+このとき、`要約とは別に保持する直近ターン数` は `3` に設定しています。
+
+1. 「この文書の目的を教えてください」
+2. 「対象読者は誰ですか？」
+3. 「重要なルールを箇条書きで整理してください」
+4. 「例外事項はありますか？」
+
+<p align="center">
+  <img src="images/履歴要約例.png" alt="履歴要約例" width="900">
+</p>
+
+- 過去の会話全体は `ConversationSummaryMemory` によって日本語で要約されます。
+- 直近3ターンは要約とは別にそのまま保持されるため、最新の文脈を落としにくくなります。
+- これにより、長い会話でもトークン消費を抑えながら、follow-up 質問への対応を続けやすくなります。
 
 ### 他の回答例
 
@@ -277,11 +306,12 @@ streamlit run app.py
 3. 「🚀 インデックス作成」を押します。
 4. 必要に応じて分割結果や分割方式比較を確認します。
 5. 右カラムで検索件数 `k`、プロンプトタイプ、実行モード、会話履歴ON/OFFを設定します。
-6. 実行モードを `通常RAG` にすると、LangGraph の `rewrite_query -> retrieve -> generate` フローで回答します。
-7. 実行モードを `Function Calling RAG` にすると、LLM が `search_documents_tool()` や `summarize_history_tool()` を必要に応じて呼び出します。
-8. 実行モードを `LLM Routing RAG` にすると、質問内容に応じて `document / web / general` の経路へ自動分岐します。
-9. 質問を入力して「🤖 回答生成」を押します。
-10. 最終回答、会話履歴、検索根拠、類似度スコア、必要に応じて Tool Callingログや LLM Routing結果を確認します。
+6. 必要に応じて `ConversationSummaryMemoryで長い履歴を要約する` をオンにし、直近保持ターン数を調整します。
+7. 実行モードを `通常RAG` にすると、LangGraph の `rewrite_query -> retrieve -> generate` フローで回答します。
+8. 実行モードを `Function Calling RAG` にすると、LLM が `search_documents_tool()` や `summarize_history_tool()` を必要に応じて呼び出します。
+9. 実行モードを `LLM Routing RAG` にすると、質問内容に応じて `document / web / general` の経路へ自動分岐します。
+10. 質問を入力して「🤖 回答生成」を押します。
+11. 最終回答、会話履歴、検索根拠、類似度スコア、必要に応じて Tool Callingログや LLM Routing結果、ConversationSummaryMemory の要約結果を確認します。
 
 ## 注意点
 
@@ -290,7 +320,7 @@ streamlit run app.py
 - `chroma_db` は実行時に再作成されます。
 - LangChain のバージョン差分でAPIが変わることがあるため、`requirements.txt` の固定管理をおすすめします。
 
-## 今後の改善案
+## ~~今後の改善案~~ -->　完了
 - 検索件数 k の可変化 --> 実装済み
   - ~~`answer_question()`では現在`search_kwargs={"k": 3}`で固定されているが、UIから変更できるようにすることで、Retrieverが何件の文書を返すかで回答がどう変わるかを比較できる。`as_retriever()`の役割、検索件数と回答精度の関係、ノイズ混入の感覚を把握できる。~~
 - 類似度スコアの表示 --> 実装済み
@@ -307,9 +337,12 @@ streamlit run app.py
     - ~~LLMが必要に応じてPython関数や外部処理を呼び出せるようにし、文書検索・履歴要約・条件分岐をより柔軟に制御できる構成を学べるようにする。~~
 - LLM Routing  -> 実装済み
     - ~~質問内容に応じて、文書検索・Web検索・通常応答など最適な処理経路へ分岐し、精度と効率の両立を学べるようにする。~~
-- History Compression
-    - 長い会話履歴を要約して保持し、トークン消費を抑えながら対話の一貫性を保つ手法を学べるようにする。
-- ベクトルストアの再利用機能
-    - 同じ文章で動作確認を繰り返しているので、OpenAI API利用料金節約のため永続化できないか検討(RecordManagerが適用できそう？)
-- 評価機能
-    - 通常RAG vs LLM Routing(documentルート) の比較評価を入れる(Ragasを適用か？)
+- History Compression --> 実装済み
+    - ~~`ConversationSummaryMemory` と日本語要約プロンプトを使い、長い会話履歴を圧縮しつつ直近ターンを保持できるようにした。~~
+
+
+## 難しかった点・課題
+- プロンプト設計が不十分だと、履歴要約が英語になったり、意図した回答形式やツール選択にならなかった。特に ConversationSummaryMemory では日本語要約用のプロンプトを明示する重要性を実感した。
+- Streamlit の再実行モデルの影響のため必要となっている通常の会話履歴と要約メモリの整合性を保つ実装について、まだ理解できていない部分が多い（キャッチアップ予定）
+- Function Calling では、ツールを定義しただけでは十分ではなく、「どの質問でどのツールが呼ばれるべきか」を安定させる設計が難しかった。
+- 最もらしい回答を得られるところまでざっと理解できたが、得られた回答に対する定量的な評価ができていないのが課題と感じた。定量評価の導入も検討してみたい。

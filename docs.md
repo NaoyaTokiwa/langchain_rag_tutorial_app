@@ -60,6 +60,9 @@ LLM routing RAG
 | `split_documents()` | 分割方式に応じて文書をチャンク化 | `RecursiveCharacterTextSplitter`, `CharacterTextSplitter` | Split |
 | `build_vectorstore()` | 分割 → 埋め込み → Chroma保存 | `OpenAIEmbeddings`, `Chroma` | Split + Store |
 | `format_chat_history()` | 直近の会話履歴を整形 | - | History整形 |
+| `get_or_create_conversation_memory()` | `ConversationSummaryMemory` を初期化 | `ConversationSummaryMemory`, `ChatOpenAI` | History要約 |
+| `rebuild_conversation_memory_from_history()` | 通常履歴から要約メモリを再構築 | `ConversationSummaryMemory` | History要約 |
+| `format_chat_history_with_summary()` | 要約 + 直近ターンで履歴を整形 | `ConversationSummaryMemory` | History要約 |
 | `get_prompt_template()` | プロンプト切り替え | `ChatPromptTemplate` | Prompt |
 | `rewrite_query_node()` | 会話履歴を使って検索用クエリへ補完 | `ChatPromptTemplate`, `ChatOpenAI` | Query Rewrite |
 | `retrieve_node()` | 補完後クエリで類似検索 | `Chroma` | Retrieve |
@@ -155,6 +158,65 @@ graph_builder.add_edge("generate", END)
 - 会話履歴つきRAGの流れを、**質問補完 → 検索 → 回答生成** の3段階に分けています。
 - LangGraph を使うことで、状態の流れとノード責務がコード上で見えやすくなります。
 - 今後、要約ノードや履歴圧縮ノードを追加したい場合も、この構造にノードを足して拡張しやすいです。
+
+### 3.5 ConversationSummaryMemory による履歴圧縮
+
+#### 背景
+- 直近数ターンだけを `format_chat_history()` で渡す方式はシンプルですが、会話が長くなると重要な前提が落ちやすくなります。
+- 一方で、全履歴を毎回そのまま渡すと、トークン数が増えてコストやレイテンシが悪化しやすくなります。
+- そのため今回の `app.py` では、`ConversationSummaryMemory` を使って**過去会話を要約しつつ、直近ターンは生のまま残す**構成を追加しています。
+
+#### `SUMMARY_PROMPT_JA` - 日本語要約プロンプト
+```python
+SUMMARY_PROMPT_JA = PromptTemplate(
+    input_variables=["summary", "new_lines"],
+    template="""
+あなたは会話履歴を日本語で要約するアシスタントです。
+これまでの要約と新しい会話履歴をもとに、要点だけを自然な日本語で更新要約してください。
+必ず日本語で出力してください。
+""".strip(),
+)
+```
+
+- `ConversationSummaryMemory` の既定動作に任せると、要約が英語で出る場合があります。
+- そこで `SUMMARY_PROMPT_JA` を明示し、要約文を必ず日本語で更新するようにしています。
+
+#### `get_or_create_conversation_memory()` - 要約メモリの生成
+```python
+def get_or_create_conversation_memory():
+```
+
+- Session State 上に `conversation_memory` がなければ、新しく `ConversationSummaryMemory` を作成します。
+- 要約用LLMには `ChatOpenAI(model="gpt-4o-mini", temperature=0)` を使い、毎回ぶれにくい要約になるようにしています。
+
+#### `rebuild_conversation_memory_from_history()` - 履歴からの再構築
+```python
+def rebuild_conversation_memory_from_history(chat_history):
+```
+
+- Streamlit は操作のたびに再実行されるため、通常履歴と要約メモリの整合性が崩れないよう、必要時に `chat_history` から再構築できるようにしています。
+- 各ターンを `memory.save_context({"input": ...}, {"output": ...})` で順番に流し込み、要約を再生成します。
+
+#### `format_chat_history_with_summary()` - 要約 + 直近ターン整形
+```python
+def format_chat_history_with_summary(chat_history, max_turns=3):
+```
+
+- この関数は、長い会話履歴をそのまま全部渡す代わりに、`[これまでの会話要約]` と `[直近の会話]` をまとめて返します。
+- `memory_summary_enabled` がオフなら、従来どおり `format_chat_history()` を使います。
+- `len(chat_history) <= max_turns` の間は無理に要約を前面に出さず、短い会話では直近履歴だけを返すようにしています。
+
+#### どこで使われるか
+- `classify_workflow_route_with_llm()` では、ルーティング判定時にも要約付き履歴を参照します。
+- `rewrite_query_node()` では、曖昧な follow-up 質問を補完する際に要約付き履歴を参照します。
+- `generate_node()` や `general_answer_node_response()` でも、回答生成時の会話文脈として要約付き履歴を使います。
+- `summarize_history_tool()` も `format_chat_history_with_summary()` を返すため、Function Calling RAG でも長い履歴を圧縮した形で扱えます。
+
+#### UIでの確認ポイント
+- `ConversationSummaryMemoryで長い履歴を要約する` のチェックボックスで有効/無効を切り替えられます。
+- `要約とは別に保持する直近ターン数` のスライダーで、何ターンを生のまま残すか調整できます。
+- `render_chat_history_view()` 内では `ConversationSummaryMemory の要約結果` を展開表示できるため、内部の圧縮結果を画面上で確認できます。
+- `reset_chat_history()` では通常履歴だけでなく `conversation_memory.clear()` も行い、表示履歴と内部要約のずれを防いでいます。
 
 ### 4. なぜ LangGraph を使うのか
 
