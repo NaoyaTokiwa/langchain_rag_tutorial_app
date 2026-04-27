@@ -28,7 +28,7 @@ Function Calling RAG
                      ↓                            │
                             finalize ←───────────┘
 
-LLM routing RAG
+Workflow Routing RAG
                                   ↓
                            質問入力(question)
                                   ↓
@@ -374,10 +374,10 @@ agent
                        END
 ```
 
-### 8. LLM routing RAG の構成
+### 8. Workflow Routing RAG の構成
 
-#### LLM routing RAG の全体フロー
-LLM routing RAG では、最初に LLM が質問内容を見て、どの処理フローに進むべきかを判定します。
+#### Workflow Routing RAG の全体フロー
+Workflow Routing RAG では、最初に LLM が質問内容を見て、どの処理フローに進むべきかを判定します。
 この実装では、質問を `document` / `web` / `general` の3種類に分類し、その結果に応じて後続のノードを切り替えます。
 
 ```text
@@ -543,10 +543,10 @@ graph_builder.add_conditional_edges(
 7. LLM はツール結果を受けて、さらにツールを呼ぶか、そのまま最終回答に進むかを判断する。
 8. `tool_calling_finalize_node()` が最終回答を確定し、UI に Tool Calling ログとあわせて表示する。
 
-#### LLM routing RAG
+#### Workflow Routing RAG
 1. 文書をアップロードしてベクトルDBを準備する。
 2. ユーザーが質問を入力する。
-3. `answer_question_with_workflow_routing()` が LLM routing 用の state を作る。
+3. `answer_question_with_workflow_routing()` が Workflow Routing 用の state を作る。
 4. `build_workflow_routing_graph()` の `classify_workflow_route_node()` が、質問を `document / web / general` に分類する。
 5. `document` の場合は、質問補完 → 文書検索 → 回答生成の順に実行する。
 6. `web` の場合は、Web調査メモを生成し、その内容をもとに回答生成する。

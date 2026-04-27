@@ -2,9 +2,11 @@
 
 LangChain、LangGraph、Streamlit を使って、RAG（Retrieval-Augmented Generation）の基本を学べる初心者向けチュートリアルアプリです。
 
-このアプリでは、文書のアップロード、チャンク分割、埋め込み、ベクトルDB保存、検索、回答生成までの流れを、UIで確認しながら体験できます。加えて、検索件数 `k`、プロンプトタイプ、分割方式、**LangGraph を用いた会話履歴つきQ&A**、**Function Calling（Tool Calling）を用いたRAG**、**LLM Routing RAG** を切り替えながら、RAGの設計ポイントを比較学習できます。
+このアプリでは、文書のアップロード、チャンク分割、埋め込み、ベクトルDB保存、検索、回答生成までの流れを、UIで確認しながら体験できます。加えて、検索件数 `k`、プロンプトタイプ、分割方式、**LangGraph を用いた会話履歴つきQ&A**、**Function Calling（Tool Calling）を用いたRAG**、**Workflow Routing RAG※** を切り替えながら、RAGの設計ポイントを比較学習できます。
 
 ⚠️本来であれば`app.py`を`config.py`や`ui.py`など役割ごとに分割する構成にする方が望ましいが、生成AI活用した修正を行いやすいように1つのファイルにて管理
+
+
 
 <p align="center">
   <img src="images/全体構成.png" alt="全体構成" width="900">
@@ -21,10 +23,10 @@ LangChain、LangGraph、Streamlit を使って、RAG（Retrieval-Augmented Gener
 - 会話履歴あり / なし を切り替えて、単発RAGと対話型RAGを比較
 - `ConversationSummaryMemory` による会話履歴の要約保持を確認
 - LangGraph の `rewrite_query -> retrieve -> generate` フローを使った会話履歴つきQ&A
-- `通常RAG` / `Function Calling RAG` / `LLM Routing RAG` の実行モード比較
+- `通常RAG` / `Function Calling RAG` / `Workflow Routing RAG` の実行モード比較
 - `search_documents_tool()` / `summarize_history_tool()` を使った Tool Calling の学習
 - Tool Callingログを見ながら、LLM がどのツールを呼んだか確認
-- LLM Routing結果を見ながら、質問がどの経路に分類されたか確認
+- Workflow Routing結果を見ながら、質問がどの経路に分類されたか確認
 - 検索根拠、会話履歴、最終回答を同じ画面で確認
 
 ## RAGの流れ
@@ -42,7 +44,7 @@ Function Calling RAG:
                                ↓
                search_documents_tool / summarize_history_tool
 
-LLM Routing RAG:
+Workflow Routing RAG:
 質問入力 → route_question で分類
           ├→ document: rewrite_query → retrieve → generate_document_answer
           ├→ web: search_web_context → generate_web_answer
@@ -54,7 +56,7 @@ LLM Routing RAG:
 - このアプリでは、さらに LangGraph を使って会話履歴を検索前段にも反映し、曖昧な follow-up 質問を補完してから検索します。
 - また、長い会話履歴は `ConversationSummaryMemory` で日本語要約し、直近ターンと組み合わせてプロンプトへ渡すことで、トークン増加を抑えつつ対話の一貫性を保ちます。
 - また、Function Calling RAG では、LLM が必要に応じて `search_documents_tool()` や `summarize_history_tool()` を選び、ツール結果を使って最終回答を作る流れも学べます。
-- LLM Routing RAG では、質問内容を `document / web / general` に分類し、文書検索・Web向け回答・通常回答のどれが適切かを判定してから処理を進めます。
+- Workflow Routing RAG では、質問内容を `document / web / general` に分類し、文書検索・Web向け回答・通常回答のどれが適切かを判定してから処理を進めます。
 
 ## 学習ポイント
 
@@ -101,14 +103,14 @@ LLM Routing RAG:
 - LangGraph では `agent -> tool_execution -> agent -> finalize` という流れで、LLM とツール実行を分離して学べます。
 - UI の Tool Callingログから、どのツールがどんな引数で呼ばれたか確認できます。
 
-### 6. LLM Routing の学習
+### 6. Workflow Routing の学習
 
-- 実行モードを `LLM Routing RAG` に切り替えると、`classify_route_with_llm()` が質問を `document / web / general` の3経路に分類します。
+- 実行モードを `Workflow Routing RAG` に切り替えると、`classify_route_with_llm()` が質問を `document / web / general` の3経路に分類します。
 - `document` ルートでは、`routing_rewrite_query_node()` → `routing_retrieve_node()` → `routing_generate_document_answer_node()` の流れで、通常RAGに近い文書検索ベースの回答を行います。
 - `web` ルートでは、`search_web_context()` が外部情報用の調査メモを生成し、`routing_generate_web_answer_node()` がその内容をもとに回答します。
 - `general` ルートでは、`general_answer_node_response()` を使って、検索を行わず通常のLLM回答を返します。
 - ルーティングには会話履歴も使うため、follow-up 質問でも前後関係を踏まえて route を選びやすくしています。
-- UI では `LLM Routing結果` が表示され、`web` ルート時には `Web調査メモ` も確認できます。
+- UI では `Workflow Routing結果` が表示され、`web` ルート時には `Web調査メモ` も確認できます。
 
 ## アプリ画面
 
@@ -160,9 +162,9 @@ LLM Routing RAG:
 - 前の質問内容を踏まえつつ、ツール結果を根拠に次の回答を作る流れを確認できます。
 
 
-#### LLM Routingの動作確認例
+#### Workflow Routingの動作確認例
 
-以下は、LLM Routing RAG において質問内容に応じて `document` / `web` / `general` の各ルートへ分岐した際の出力例です。
+以下は、Workflow Routing RAG において質問内容に応じて `document` / `web` / `general` の各ルートへ分岐した際の出力例です。
 
 - `document` ルート: 架空企業の社内ハンドブック文書を検索して回答する例
 
@@ -313,9 +315,9 @@ streamlit run app.py
 6. 必要に応じて `ConversationSummaryMemoryで長い履歴を要約する` をオンにし、直近保持ターン数を調整します。
 7. 実行モードを `通常RAG` にすると、LangGraph の `rewrite_query -> retrieve -> generate` フローで回答します。
 8. 実行モードを `Function Calling RAG` にすると、LLM が `search_documents_tool()` や `summarize_history_tool()` を必要に応じて呼び出します。
-9. 実行モードを `LLM Routing RAG` にすると、質問内容に応じて `document / web / general` の経路へ自動分岐します。
+9. 実行モードを `Workflow Routing RAG` にすると、質問内容に応じて `document / web / general` の経路へ自動分岐します。
 10. 質問を入力して「🤖 回答生成」を押します。
-11. 最終回答、会話履歴、検索根拠、類似度スコア、必要に応じて Tool Callingログや LLM Routing結果、ConversationSummaryMemory の要約結果を確認します。
+11. 最終回答、会話履歴、検索根拠、類似度スコア、必要に応じて Tool Callingログや Workflow Routing結果、ConversationSummaryMemory の要約結果を確認します。
 
 ## 注意点
 
@@ -339,7 +341,7 @@ streamlit run app.py
 - Function Calling(Tool Callingの一種)  --> 実装済み
     - ~~Tool Calling：LLM が必要に応じて外部ツールを選んで実行し、その結果を使って最終回答を作る仕組み~~
     - ~~LLMが必要に応じてPython関数や外部処理を呼び出せるようにし、文書検索・履歴要約・条件分岐をより柔軟に制御できる構成を学べるようにする。~~
-- LLM Routing  -> 実装済み
+- Workflow Routing  -> 実装済み
     - ~~質問内容に応じて、文書検索・Web検索・通常応答など最適な処理経路へ分岐し、精度と効率の両立を学べるようにする。~~
 - History Compression --> 実装済み
     - ~~`ConversationSummaryMemory` と日本語要約プロンプトを使い、長い会話履歴を圧縮しつつ直近ターンを保持できるようにした。~~

@@ -74,8 +74,8 @@ SESSION_DEFAULTS = {
     "tool_calling_graph": None,  # Function Calling 用のLangGraph保持用
     "execution_mode": "通常RAG",  # UI の選択状態
     "last_tool_trace": [],  # ログ表示用
-    "workflow_routing_graph": None,  # LLM Routing 用のLangGraph保持用
-    "last_workflow_route": "",  # LLM Routingで選ばれた経路表示用
+    "workflow_routing_graph": None,  # Workflow Routing 用のLangGraph保持用
+    "last_workflow_route": "",  # Workflow Routingで選ばれた経路表示用
     "last_web_context": "",  # Web検索ルートの参考メモ表示用
 }
 
