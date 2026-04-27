@@ -2,11 +2,9 @@
 
 LangChain、LangGraph、Streamlit を使って、RAG（Retrieval-Augmented Generation）の基本を学べる初心者向けチュートリアルアプリです。
 
-このアプリでは、文書のアップロード、チャンク分割、埋め込み、ベクトルDB保存、検索、回答生成までの流れを、UIで確認しながら体験できます。加えて、検索件数 `k`、プロンプトタイプ、分割方式、**LangGraph を用いた会話履歴つきQ&A**、**Function Calling（Tool Calling）を用いたRAG**、**Workflow Routing RAG※** を切り替えながら、RAGの設計ポイントを比較学習できます。
+このアプリでは、文書のアップロード、チャンク分割、埋め込み、ベクトルDB保存、検索、回答生成までの流れを、UIで確認しながら体験できます。加えて、検索件数 `k`、プロンプトタイプ、分割方式、**LangGraph を用いた会話履歴つきQ&A**、**Function Calling（Tool Calling）を用いたRAG**、**LLMベースのWorkflow Routing RAG※** を切り替えながら、RAGの設計ポイントを比較学習できます。
 
 ⚠️本来であれば`app.py`を`config.py`や`ui.py`など役割ごとに分割する構成にする方が望ましいが、生成AI活用した修正を行いやすいように1つのファイルにて管理
-
-
 
 <p align="center">
   <img src="images/全体構成.png" alt="全体構成" width="900">
@@ -56,7 +54,7 @@ Workflow Routing RAG:
 - このアプリでは、さらに LangGraph を使って会話履歴を検索前段にも反映し、曖昧な follow-up 質問を補完してから検索します。
 - また、長い会話履歴は `ConversationSummaryMemory` で日本語要約し、直近ターンと組み合わせてプロンプトへ渡すことで、トークン増加を抑えつつ対話の一貫性を保ちます。
 - また、Function Calling RAG では、LLM が必要に応じて `search_documents_tool()` や `summarize_history_tool()` を選び、ツール結果を使って最終回答を作る流れも学べます。
-- Workflow Routing RAG では、質問内容を `document / web / general` に分類し、文書検索・Web向け回答・通常回答のどれが適切かを判定してから処理を進めます。
+- Workflow Routing RAG では、LLMを用いて質問内容を `document / web / general` に分類し、文書検索・Web向け回答・通常回答のどれが適切かを判定してから処理を進めます。
 
 ## 学習ポイント
 
