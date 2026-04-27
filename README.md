@@ -6,6 +6,10 @@ LangChain、LangGraph、Streamlit を使って、RAG（Retrieval-Augmented Gener
 
 ⚠️本来であれば`app.py`を`config.py`や`ui.py`など役割ごとに分割する構成にする方が望ましいが、生成AI活用した修正を行いやすいように1つのファイルにて管理
 
+<p align="center">
+  <img src="images/全体構成.png" alt="全体構成" width="900">
+</p>
+
 ## このアプリでできること
 
 - `.txt` / `.md` ファイルをアップロードしてRAG用インデックスを作成
