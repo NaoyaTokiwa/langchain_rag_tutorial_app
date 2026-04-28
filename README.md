@@ -84,7 +84,7 @@ Workflow Routing RAG:
 - その後 `retrieve_node()` で補完済みクエリ検索、`generate_node()` で回答生成を行います。
 - これにより、単発RAGと対話型RAGの違いだけでなく、**検索前に文脈補完する重要性** も学べます。
 
-### 4.5 ConversationSummaryMemory による履歴要約
+### 5 ConversationSummaryMemory による履歴要約
 
 - 長い会話履歴をそのまま毎回 LLM に渡すと、トークン消費が増え、応答速度やコストに影響しやすくなります。
 - そこでこのアプリでは、`ConversationSummaryMemory` を使って過去会話を**日本語で要約**し、さらに直近の数ターンをそのまま残す構成を採用しています。
@@ -93,7 +93,7 @@ Workflow Routing RAG:
 - UI では `ConversationSummaryMemoryで長い履歴を要約する` のチェックボックスと、`要約とは別に保持する直近ターン数` のスライダーで挙動を切り替えられます。
 - さらに、`会話履歴` セクション内の `ConversationSummaryMemory の要約結果` から、内部でどのように履歴が圧縮されているかを確認できます。
 
-### 5. Function Calling（Tool Calling）の学習
+### 6. Function Calling（Tool Calling）の学習
 
 - 実行モードを `Function Calling RAG` に切り替えると、LLM が必要に応じてツールを選択します。
 - `search_documents_tool()` はベクトルDBを検索し、検索根拠を返します。
@@ -101,7 +101,7 @@ Workflow Routing RAG:
 - LangGraph では `agent -> tool_execution -> agent -> finalize` という流れで、LLM とツール実行を分離して学べます。
 - UI の Tool Callingログから、どのツールがどんな引数で呼ばれたか確認できます。
 
-### 6. Workflow Routing の学習
+### 7. Workflow Routing の学習
 
 - 実行モードを `Workflow Routing RAG` に切り替えると、`classify_route_with_llm()` が質問を `document / web / general` の3経路に分類します。
 - `document` ルートでは、`routing_rewrite_query_node()` → `routing_retrieve_node()` → `routing_generate_document_answer_node()` の流れで、通常RAGに近い文書検索ベースの回答を行います。

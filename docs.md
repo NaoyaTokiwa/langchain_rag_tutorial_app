@@ -562,7 +562,7 @@ graph_builder.add_conditional_edges(
 - LangGraph によって、状態遷移ベースで RAG を組み立てられること。
 - 将来的に Query Routing、History Compression、Tool Calling などへ拡張しやすい構成を作れること。
 
-### 9. 重要パラメータ解説
+### 11. 重要パラメータ解説
 
 #### temperature
 
